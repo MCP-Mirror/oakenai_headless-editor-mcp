@@ -9,6 +9,7 @@ import {
   DocumentFormattingRequest,
   InitializeParams,
   InitializeRequest,
+  LocationLink,
   Position,
   ProtocolConnection,
   TextEdit,
@@ -19,8 +20,13 @@ import {
 } from 'vscode-languageserver-protocol/node.js';
 import { Location } from 'vscode-languageserver-types';
 import { BaseError } from '../types/errors.js';
-import { LanguageServer, LSPManager } from '../types/lsp.js';
+import {
+  LanguageServer,
+  LSPManager,
+  TypeScriptServerInitializationOptions,
+} from '../types/lsp.js';
 import { Logger } from '../utils/logger.js';
+import { TypeScriptServer } from './languages/typescript.js';
 
 /**
  * Configuration for a language server
@@ -81,26 +87,30 @@ const DEFAULT_SERVER_CONFIGS: Record<
 
 export class LSPManagerImpl implements LSPManager {
   private servers: Map<string, LanguageServer>;
+  private languageServers: Map<string, TypeScriptServer>;
   private configs: Map<string, LSPServerConfig>;
-  private logger: Logger;
   private processes: Map<string, ChildProcess>;
 
-  constructor(
-    logger: Logger,
-    rootUri: string | null = null,
-    workspaceFolders: string[] = []
-  ) {
+  constructor(private readonly logger: Logger) {
     this.processes = new Map();
     this.servers = new Map();
+    this.languageServers = new Map();
     this.configs = new Map();
     this.logger = logger;
+
     // Initialize default configs
-    Object.entries(DEFAULT_SERVER_CONFIGS).forEach(([language, config]) => {
-      this.configs.set(language, {
-        ...config,
-        rootUri,
-        workspaceFolders,
-      });
+    this.configs.set('typescript', {
+      command: 'typescript-language-server',
+      args: ['--stdio'],
+      rootUri: null,
+      workspaceFolders: [],
+      initializationOptions: {
+        preferences: {
+          includeInlayParameterNameHints: 'all',
+          includeInlayPropertyDeclarationTypeHints: true,
+          includeInlayFunctionLikeReturnTypeHints: true,
+        },
+      },
     });
   }
 
@@ -194,6 +204,62 @@ export class LSPManagerImpl implements LSPManager {
    * Creates and initializes a language server instance
    */
   private async createServer(
+    language: string,
+    config: LSPServerConfig
+  ): Promise<LanguageServer> {
+    // For TypeScript/JavaScript, use TypeScriptServer
+    if (language === 'typescript' || language === 'javascript') {
+      const tsServer = new TypeScriptServer(
+        {
+          rootPath: process.cwd(), // Or get from config
+          preferences: (
+            config.initializationOptions as TypeScriptServerInitializationOptions
+          )?.preferences,
+        },
+        this.logger
+      );
+
+      await tsServer.initialize();
+      this.languageServers.set(language, tsServer);
+
+      // Return LanguageServer interface implementation
+      return {
+        async initialize(): Promise<void> {
+          // Already initialized
+        },
+
+        async shutdown(): Promise<void> {
+          await tsServer.shutdown();
+        },
+
+        async validateDocument(
+          uri: string,
+          content: string
+        ): Promise<Diagnostic[]> {
+          return tsServer.validateDocument(uri);
+        },
+
+        async formatDocument(
+          uri: string,
+          content: string
+        ): Promise<TextEdit[]> {
+          return tsServer.formatDocument(uri);
+        },
+
+        async getDefinition(
+          uri: string,
+          position: Position
+        ): Promise<Location[] | LocationLink[]> {
+          return tsServer.getDefinition(uri, position);
+        },
+      };
+    }
+
+    // For other languages, use the generic LSP implementation
+    return this.createGenericServer(language, config);
+  }
+
+  private async createGenericServer(
     language: string,
     config: LSPServerConfig
   ): Promise<LanguageServer> {

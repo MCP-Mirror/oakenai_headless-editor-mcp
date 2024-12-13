@@ -1,6 +1,7 @@
 // src/services/languages/typescript.ts
 import { ChildProcess, spawn } from 'child_process';
-import path from 'path';
+import path, { dirname } from 'path';
+import { fileURLToPath } from 'url';
 import {
   CodeAction,
   CodeActionRequest,
@@ -11,28 +12,18 @@ import {
   DefinitionRequest,
   Diagnostic,
   DidChangeTextDocumentNotification,
-  DidCloseTextDocumentNotification,
   DidOpenTextDocumentNotification,
   DocumentFormattingRequest,
-  Hover,
-  HoverRequest,
   InitializeParams,
   InitializeRequest,
   Location,
+  LocationLink,
   Position,
   ProtocolConnection,
   Range,
-  ReferencesRequest,
-  RenameRequest,
-  SymbolInformation,
-  TextDocumentSyncKind,
   TextEdit,
-  WorkspaceEdit,
-  WorkspaceSymbolRequest,
 } from 'vscode-languageserver-protocol';
 import {
-  MessageReader,
-  MessageWriter,
   StreamMessageReader,
   StreamMessageWriter,
 } from 'vscode-languageserver-protocol/node.js';
@@ -75,6 +66,29 @@ export class TypeScriptServer {
     private readonly logger: Logger
   ) {}
 
+  private async getTsServerPath(): Promise<string> {
+    try {
+      // Use import.meta.resolve for ES modules
+      const tsPath = await import.meta.resolve('typescript');
+      if (!tsPath) {
+        throw new TypeScriptServerError(
+          'Could not resolve typescript package',
+          'RESOLVE_FAILED'
+        );
+      }
+
+      const tsDir = dirname(fileURLToPath(tsPath));
+      return `${tsDir}/lib/tsserver.js`;
+    } catch (error) {
+      this.logger.error('Failed to resolve tsserver path', error as Error);
+      throw new TypeScriptServerError(
+        'Failed to resolve tsserver path',
+        'RESOLVE_FAILED',
+        { error }
+      );
+    }
+  }
+
   /**
    * Initializes the TypeScript language server
    */
@@ -84,10 +98,14 @@ export class TypeScriptServer {
         return;
       }
 
+      // Get tsserver path
+      const tsServerPath = await this.getTsServerPath();
+
       // Start the server process
       this.serverProcess = spawn('typescript-language-server', ['--stdio'], {
         env: {
           ...process.env,
+          TSS_PATH: tsServerPath,
           TSS_MAX_MEMORY: String(this.config.maxTsServerMemory || 3072),
         },
       });
@@ -188,11 +206,7 @@ export class TypeScriptServer {
         ],
         initializationOptions: {
           preferences: this.config.preferences,
-          tsserver: {
-            path: require.resolve('typescript/lib/tsserver.js'),
-            maxTsServerMemory: this.config.maxTsServerMemory,
-            tsconfig: this.config.tsconfigPath,
-          },
+          tsconfig: this.config.tsconfigPath,
         },
       };
 
@@ -214,12 +228,13 @@ export class TypeScriptServer {
         }
       );
 
+      this.connection.listen();
+
       await this.connection.sendRequest(
         InitializeRequest.type,
         initializeParams
       );
 
-      this.connection.listen();
       this.initialized = true;
 
       this.logger.info('TypeScript server initialized', {
@@ -489,6 +504,43 @@ export class TypeScriptServer {
         'Failed to format document',
         'FORMAT_FAILED',
         { uri, error }
+      );
+    }
+  }
+
+  async getDefinition(
+    uri: string,
+    position: Position
+  ): Promise<Location[] | LocationLink[]> {
+    if (!this.connection || !this.initialized) {
+      throw new TypeScriptServerError(
+        'Server not initialized',
+        'NOT_INITIALIZED'
+      );
+    }
+
+    try {
+      const result = await this.connection.sendRequest(DefinitionRequest.type, {
+        textDocument: { uri },
+        position,
+      });
+
+      if (Array.isArray(result)) {
+        return result;
+      } else if (result) {
+        return [result];
+      }
+
+      return [];
+    } catch (error) {
+      this.logger.error('Failed to get definition', error as Error, {
+        uri,
+        position,
+      });
+      throw new TypeScriptServerError(
+        'Failed to get definition',
+        'GET_DEFINITION_FAILED',
+        { uri, position, error }
       );
     }
   }

@@ -4,6 +4,7 @@ import {
   createProtocolConnection,
   DefinitionRequest,
   Diagnostic,
+  DidChangeTextDocumentNotification,
   DidCloseTextDocumentNotification,
   DidOpenTextDocumentNotification,
   DocumentFormattingRequest,
@@ -131,11 +132,12 @@ export class LSPManagerImpl implements LSPManager {
 
     // Handle stream errors
     reader.onError((error) => {
-      this.logger.error('LSP reader error', error);
+      this.logger.error('LSP reader error', error as Error);
     });
 
     writer.onError((error) => {
-      this.logger.error('LSP writer error', error);
+      const [message, ...context] = error;
+      this.logger.error('LSP writer error', message);
     });
 
     const connection = createProtocolConnection(reader, writer, this.logger);
@@ -236,7 +238,7 @@ export class LSPManagerImpl implements LSPManager {
           uri: string,
           content: string
         ): Promise<Diagnostic[]> {
-          return tsServer.validateDocument(uri);
+          return tsServer.validateDocument(uri, content);
         },
 
         async formatDocument(
@@ -251,6 +253,26 @@ export class LSPManagerImpl implements LSPManager {
           position: Position
         ): Promise<Location[] | LocationLink[]> {
           return tsServer.getDefinition(uri, position);
+        },
+
+        async didOpen(
+          uri: string,
+          content: string,
+          version: number
+        ): Promise<void> {
+          return tsServer.didOpen(uri, content, version);
+        },
+
+        async didChange(
+          uri: string,
+          changes: TextEdit[],
+          version: number
+        ): Promise<void> {
+          return tsServer.didChange(uri, changes, version);
+        },
+
+        async didClose(uri: string): Promise<void> {
+          return tsServer.didClose(uri);
         },
       };
     }
@@ -333,88 +355,23 @@ export class LSPManagerImpl implements LSPManager {
       await connection.sendRequest(InitializeRequest.type, initializeParams);
 
       return {
-        async getDefinition(
-          uri: string,
-          position: Position
-        ): Promise<Location[]> {
-          try {
-            const result = await connection.sendRequest(
-              DefinitionRequest.type,
-              {
-                textDocument: { uri },
-                position,
-              }
-            );
-            if (
-              result &&
-              Array.isArray(result) &&
-              result.every((item) => 'uri' in item && 'range' in item)
-            ) {
-              return result as Location[];
-            }
-
-            throw new LSPError(
-              'Failed to get definition',
-              'FAILED_TO_GET_DEFINITION',
-              { uri, position }
-            );
-          } catch (error) {
-            throw new LSPError(
-              'Failed to get definition',
-              'FAILED_TO_GET_DEFINITION',
-              { uri, position }
-            );
-          }
-        },
         async initialize(): Promise<void> {
           await connection.sendRequest(
             InitializeRequest.type,
             initializeParams
           );
         },
-        async formatDocument(
-          uri: string,
-          content: string
-        ): Promise<TextEdit[]> {
-          const result = await connection.sendRequest(
-            DocumentFormattingRequest.type,
-            {
-              textDocument: { uri },
-              options: { tabSize: 2, insertSpaces: true },
-            }
-          );
-          if (result && Array.isArray(result)) {
-            return result as TextEdit[];
-          }
-          throw new LSPError(
-            'Failed to format document',
-            'FAILED_TO_FORMAT_DOCUMENT',
-            { uri }
-          );
-        },
+
         async shutdown(): Promise<void> {
           await connection.sendRequest('shutdown');
           serverProcess.kill();
         },
+
         async validateDocument(
           uri: string,
           content: string
         ): Promise<Diagnostic[]> {
-          // Notify the server about the document
-          await connection.sendNotification(
-            DidOpenTextDocumentNotification.type,
-            {
-              textDocument: {
-                uri,
-                languageId: language,
-                version: 1,
-                text: content,
-              },
-            }
-          );
-
-          // Request diagnostics
-          const diagnostics = await new Promise<Diagnostic[]>((resolve) => {
+          return new Promise<Diagnostic[]>((resolve) => {
             let results: Diagnostic[] = [];
 
             connection.onNotification(
@@ -427,29 +384,101 @@ export class LSPManagerImpl implements LSPManager {
               }
             );
 
-            // Set a timeout for diagnostic collection
-            setTimeout(() => resolve(results), 1000);
+            setTimeout(() => resolve(results), 2000);
           });
+        },
 
-          // Close the document
+        async didOpen(
+          uri: string,
+          content: string,
+          version: number
+        ): Promise<void> {
+          await connection.sendNotification(
+            DidOpenTextDocumentNotification.type,
+            {
+              textDocument: {
+                uri,
+                languageId: language,
+                version,
+                text: content,
+              },
+            }
+          );
+        },
+
+        async didChange(
+          uri: string,
+          changes: TextEdit[],
+          version: number
+        ): Promise<void> {
+          await connection.sendNotification(
+            DidChangeTextDocumentNotification.type,
+            {
+              textDocument: {
+                uri,
+                version,
+              },
+              contentChanges: changes.map((change) => ({
+                range: change.range,
+                text: change.newText,
+              })),
+            }
+          );
+        },
+
+        async didClose(uri: string): Promise<void> {
           await connection.sendNotification(
             DidCloseTextDocumentNotification.type,
             {
               textDocument: { uri },
             }
           );
+        },
 
-          return diagnostics;
+        async formatDocument(
+          uri: string,
+          content: string
+        ): Promise<TextEdit[]> {
+          const result = await connection.sendRequest(
+            DocumentFormattingRequest.type,
+            {
+              textDocument: { uri },
+              options: {
+                tabSize: 2,
+                insertSpaces: true,
+              },
+            }
+          );
+          return Array.isArray(result) ? result : [];
+        },
+
+        async getDefinition(
+          uri: string,
+          position: Position
+        ): Promise<Location[]> {
+          const result = await connection.sendRequest(DefinitionRequest.type, {
+            textDocument: { uri },
+            position,
+          });
+
+          if (
+            result &&
+            Array.isArray(result) &&
+            result.every((item) => 'uri' in item && 'range' in item)
+          ) {
+            return result as Location[];
+          }
+          return [];
         },
       };
     } catch (error) {
       this.logger.error(
-        `Failed to initialize LSP server for ${language}`,
+        `Failed to create generic server for ${language}`,
         error as Error
       );
       throw new LSPError(
-        `Failed to initialize server for ${language}`,
-        'START_FAILED',
+        `Failed to create server for ${language}`,
+        'CREATE_FAILED',
         { language, error }
       );
     }

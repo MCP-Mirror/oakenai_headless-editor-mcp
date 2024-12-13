@@ -14,7 +14,7 @@ import { LSPManagerImpl } from './services/LSPManager.js';
 import { SessionManager } from './services/SessionManager.js';
 import { BaseError } from './types/errors.js';
 import { LocalFileSystemManager } from './utils/fs.js';
-import { Logger } from './utils/logger.js';
+import { EnhancedLogger, Logger, LogLevel } from './utils/logger.js';
 
 // Validation schemas for tool arguments
 const StartSessionArgsSchema = z.object({
@@ -61,7 +61,8 @@ export class HeadlessEditorServer {
   private readonly editManager: EditOperationManager;
   private readonly logger: Logger;
   private readonly allowedDirectories: string[];
-  constructor(allowedDirectories: string[], logger: Logger) {
+
+  constructor(allowedDirectories: string[]) {
     // Normalize and validate allowed directories
     this.allowedDirectories = allowedDirectories.map((dir) => {
       const normalized = path.resolve(dir);
@@ -74,24 +75,51 @@ export class HeadlessEditorServer {
       return normalized;
     });
 
-    this.logger = logger;
-    this.fs = new LocalFileSystemManager();
-    this.lspManager = new LSPManagerImpl(logger);
+    this.fs = new LocalFileSystemManager(this.allowedDirectories);
+
+    let logDir = process.env.LOG_DIR;
+
+    if (!logDir) {
+      logDir = this.allowedDirectories[0] + '/logs';
+    } else {
+      // check if logDir is in allowedDirectories
+      if (!this.allowedDirectories.includes(logDir)) {
+        throw new Error(
+          `Log directory ${logDir} is not in allowed directories`
+        );
+      }
+    }
+
+    this.logger = new EnhancedLogger(
+      {
+        minLevel:
+          process.env.NODE_ENV === 'production'
+            ? LogLevel.INFO
+            : LogLevel.DEBUG,
+        logDir: logDir,
+        filename: process.env.LOG_FILE ?? 'app-%DATE%.log',
+        //console: process.env.NODE_ENV !== 'production'
+        console: false,
+      },
+      this.fs
+    );
+
+    this.lspManager = new LSPManagerImpl(this.logger);
     this.documentManager = new DocumentManager(
       this.fs,
       this.lspManager,
-      logger
+      this.logger
     );
     this.sessionManager = new SessionManager(
       this.fs,
       this.lspManager,
-      logger,
+      this.logger,
       this.allowedDirectories
     );
     this.editManager = new EditOperationManager(
       this.sessionManager,
       this.lspManager,
-      logger
+      this.logger
     );
 
     this.server = new Server(
@@ -200,6 +228,20 @@ export class HeadlessEditorServer {
             required: ['sessionId'],
           },
         },
+        {
+          name: 'close_session',
+          description: 'Close and clean up an editing session',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              sessionId: {
+                type: 'string',
+                description: 'ID of the editing session to close',
+              },
+            },
+            required: ['sessionId'],
+          },
+        },
       ],
     }));
 
@@ -263,6 +305,25 @@ export class HeadlessEditorServer {
                 {
                   type: 'text',
                   text: JSON.stringify({ diagnostics }),
+                },
+              ],
+            };
+          }
+
+          case 'close_session': {
+            const validatedArgs = z
+              .object({
+                sessionId: z.string(),
+              })
+              .parse(args);
+
+            await this.sessionManager.closeSession(validatedArgs.sessionId);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({ success: true }),
                 },
               ],
             };

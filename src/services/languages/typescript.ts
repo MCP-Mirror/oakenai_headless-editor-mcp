@@ -12,6 +12,7 @@ import {
   DefinitionRequest,
   Diagnostic,
   DidChangeTextDocumentNotification,
+  DidCloseTextDocumentNotification,
   DidOpenTextDocumentNotification,
   DocumentFormattingRequest,
   InitializeParams,
@@ -59,8 +60,13 @@ export class TypeScriptServer {
   private connection?: ProtocolConnection;
   private initialized: boolean = false;
   private documentVersions: Map<string, number> = new Map();
-  private diagnosticHandlers: Map<string, (diagnostics: Diagnostic[]) => void> =
-    new Map();
+  private diagnosticHandlers: Map<
+    string,
+    ((params: { uri: string; diagnostics: Diagnostic[] }) => void)[]
+  > = new Map();
+  // Track normalized URIs to avoid repeated normalization
+  private normalizedUris: Map<string, string> = new Map();
+
   constructor(
     private readonly config: TypeScriptServerConfig,
     private readonly logger: Logger
@@ -89,41 +95,32 @@ export class TypeScriptServer {
     }
   }
 
-  /**
-   * Initializes the TypeScript language server
-   */
-  async initialize(): Promise<void> {
-    try {
-      if (this.initialized) {
-        return;
-      }
+  private normalizeUri(uri: string): string {
+    // Check if we've already normalized this URI
+    const cached = this.normalizedUris.get(uri);
+    if (cached) {
+      return cached;
+    }
 
-      // Get tsserver path
-      const tsServerPath = await this.getTsServerPath();
+    // Convert to file:// URI if it's not already
+    const normalized = !uri.startsWith('file://')
+      ? URI.file(uri).toString()
+      : uri;
+    this.normalizedUris.set(uri, normalized);
+    return normalized;
+  }
 
-      // Start the server process
-      this.serverProcess = spawn('typescript-language-server', ['--stdio'], {
-        env: {
-          ...process.env,
-          TSS_PATH: tsServerPath,
-          TSS_MAX_MEMORY: String(this.config.maxTsServerMemory || 3072),
-        },
-      });
+  private async initializeServer(): Promise<void> {
+    if (!this.connection) {
+      throw new TypeScriptServerError(
+        'No connection available',
+        'NO_CONNECTION'
+      );
+    }
 
-      if (!this.serverProcess.stdout || !this.serverProcess.stdin) {
-        throw new TypeScriptServerError(
-          'Failed to start TypeScript server',
-          'START_FAILED'
-        );
-      }
-
-      // Create connection with proper message reader/writer
-      const reader = new StreamMessageReader(this.serverProcess.stdout);
-      const writer = new StreamMessageWriter(this.serverProcess.stdin);
-      this.connection = createProtocolConnection(reader, writer);
-
-      // Initialize connection
-      const initializeParams: InitializeParams = {
+    const initializeResult = await this.connection.sendRequest(
+      InitializeRequest.type,
+      {
         processId: process.pid,
         rootUri: URI.file(this.config.rootPath).toString(),
         capabilities: {
@@ -134,46 +131,14 @@ export class TypeScriptServer {
               willSaveWaitUntil: true,
               didSave: true,
             },
-            completion: {
-              dynamicRegistration: true,
-              completionItem: {
-                snippetSupport: true,
-                commitCharactersSupport: true,
-                documentationFormat: ['markdown', 'plaintext'],
-                deprecatedSupport: true,
-                preselectSupport: true,
-              },
-              completionItemKind: {
-                valueSet: [
-                  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
-                  19, 20, 21, 22, 23, 24, 25,
-                ],
-              },
-              contextSupport: true,
-            },
-            hover: {
-              dynamicRegistration: true,
-              contentFormat: ['markdown', 'plaintext'],
-            },
-            signatureHelp: {
-              dynamicRegistration: true,
-              signatureInformation: {
-                documentationFormat: ['markdown', 'plaintext'],
-              },
-            },
-            definition: {
-              dynamicRegistration: true,
-              linkSupport: true,
-            },
-            references: {
-              dynamicRegistration: true,
+            publishDiagnostics: {
+              relatedInformation: true,
             },
             codeAction: {
               dynamicRegistration: true,
               codeActionLiteralSupport: {
                 codeActionKind: {
                   valueSet: [
-                    '',
                     'quickfix',
                     'refactor',
                     'refactor.extract',
@@ -185,61 +150,99 @@ export class TypeScriptServer {
                 },
               },
             },
-            rename: {
-              dynamicRegistration: true,
-              prepareSupport: true,
-            },
           },
           workspace: {
-            workspaceFolders: true,
-            configuration: true,
             didChangeConfiguration: {
               dynamicRegistration: true,
             },
           },
         },
-        workspaceFolders: [
-          {
-            name: path.basename(this.config.rootPath),
-            uri: URI.file(this.config.rootPath).toString(),
-          },
-        ],
-        initializationOptions: {
-          preferences: this.config.preferences,
-          tsconfig: this.config.tsconfigPath,
-        },
-      };
+        initializationOptions: this.config.preferences,
+      }
+    );
 
-      if (!this.connection) {
+    this.logger.debug(
+      'Server initialized with capabilities:',
+      initializeResult
+    );
+  }
+
+  /**
+   * Initializes the TypeScript language server
+   */
+  async initialize(): Promise<void> {
+    if (this.initialized) {
+      return;
+    }
+
+    try {
+      // Get tsserver path
+      const tsServerPath = await this.getTsServerPath();
+
+      this.logger.debug('Initializing TypeScript server', {
+        tsServerPath,
+        config: this.config,
+      });
+
+      // Start the server process
+      this.serverProcess = spawn('typescript-language-server', ['--stdio'], {
+        env: {
+          ...process.env,
+          TSS_PATH: tsServerPath,
+          TSS_MAX_MEMORY: String(this.config.maxTsServerMemory || 3072),
+          NODE_OPTIONS: '--max-old-space-size=4096',
+        },
+      });
+
+      if (!this.serverProcess.stdout || !this.serverProcess.stdin) {
         throw new TypeScriptServerError(
-          'Connection not established',
-          'CONNECTION_FAILED'
+          'Failed to start TypeScript server',
+          'START_FAILED'
         );
       }
 
-      // Set up diagnostic notification handler
+      // Create connection
+      const reader = new StreamMessageReader(this.serverProcess.stdout);
+      const writer = new StreamMessageWriter(this.serverProcess.stdin);
+      this.connection = createProtocolConnection(reader, writer);
+
+      // Set up error handlers
+      this.serverProcess.stderr?.on('data', (data) => {
+        this.logger.error('TypeScript server error:', data.toString());
+      });
+
+      this.serverProcess.on('error', (error) => {
+        this.logger.error('TypeScript server process error:', error);
+      });
+
+      // Set up connection error handler
+      this.connection.onError((error) => {
+        const [message, ...context] = error;
+        this.logger.error('TypeScript server connection error:', message);
+      });
+
+      // Set up diagnostic handler
       this.connection.onNotification(
         'textDocument/publishDiagnostics',
         (params: { uri: string; diagnostics: Diagnostic[] }) => {
+          this.logger.debug('Received diagnostic notification', {
+            uri: params.uri,
+            diagnosticsCount: params.diagnostics.length,
+          });
+
           const handlers = this.diagnosticHandlers.get(params.uri);
-          if (handlers && Array.isArray(handlers)) {
-            handlers.forEach((handler) => handler(params.diagnostics));
+          if (handlers) {
+            handlers.forEach((handler) => handler(params));
           }
         }
       );
 
       this.connection.listen();
-
-      await this.connection.sendRequest(
-        InitializeRequest.type,
-        initializeParams
-      );
+      await this.initializeServer();
 
       this.initialized = true;
-
-      this.logger.info('TypeScript server initialized', {
-        rootPath: this.config.rootPath,
-        tsconfigPath: this.config.tsconfigPath,
+      this.logger.info('TypeScript server initialized successfully', {
+        serverState: this.debugInfo,
       });
     } catch (error) {
       this.logger.error(
@@ -414,10 +417,7 @@ export class TypeScriptServer {
     }
   }
 
-  /**
-   * Validates a document
-   */
-  async validateDocument(uri: string): Promise<Diagnostic[]> {
+  async didOpen(uri: string, content: string, version: number): Promise<void> {
     if (!this.connection || !this.initialized) {
       throw new TypeScriptServerError(
         'Server not initialized',
@@ -425,52 +425,216 @@ export class TypeScriptServer {
       );
     }
 
-    return new Promise<Diagnostic[]>((resolve, reject) => {
-      const handler = (diagnostics: Diagnostic[]) => {
-        clearTimeout(timeoutId);
-        const handlers = this.diagnosticHandlers.get(uri) || [];
+    const normalizedUri = this.normalizeUri(uri);
 
-        if (!handlers) {
-          this.logger.error('No handlers found for URI');
-          reject(new Error('No handlers found for URI'));
-          return;
+    try {
+      await this.connection.sendNotification(
+        DidOpenTextDocumentNotification.type,
+        {
+          textDocument: {
+            uri: normalizedUri,
+            languageId: 'typescript',
+            version,
+            text: content,
+          },
+        }
+      );
+
+      this.documentVersions.set(normalizedUri, version);
+      this.logger.debug('Document opened', { uri: normalizedUri, version });
+    } catch (error) {
+      this.logger.error('Failed to open document', error as Error);
+      throw error;
+    }
+  }
+
+  async didChange(
+    uri: string,
+    changes: TextEdit[],
+    version: number
+  ): Promise<void> {
+    if (!this.connection || !this.initialized) {
+      throw new TypeScriptServerError(
+        'Server not initialized',
+        'NOT_INITIALIZED'
+      );
+    }
+
+    const normalizedUri = this.normalizeUri(uri);
+
+    try {
+      await this.connection.sendNotification(
+        DidChangeTextDocumentNotification.type,
+        {
+          textDocument: {
+            uri: normalizedUri,
+            version,
+          },
+          contentChanges: changes.map((change) => ({
+            range: change.range,
+            text: change.newText,
+          })),
+        }
+      );
+
+      this.documentVersions.set(normalizedUri, version);
+      this.logger.debug('Document changed', {
+        uri: normalizedUri,
+        version,
+        changes,
+      });
+    } catch (error) {
+      this.logger.error('Failed to process document change', error as Error);
+      throw error;
+    }
+  }
+
+  async didClose(uri: string): Promise<void> {
+    if (!this.connection || !this.initialized) {
+      throw new TypeScriptServerError(
+        'Server not initialized',
+        'NOT_INITIALIZED'
+      );
+    }
+
+    const normalizedUri = this.normalizeUri(uri);
+
+    try {
+      await this.connection.sendNotification(
+        DidCloseTextDocumentNotification.type,
+        {
+          textDocument: { uri: normalizedUri },
+        }
+      );
+
+      this.documentVersions.delete(normalizedUri);
+      this.diagnosticHandlers.delete(normalizedUri);
+      this.logger.debug('Document closed', { uri: normalizedUri });
+    } catch (error) {
+      this.logger.error('Failed to close document', error as Error);
+      throw error;
+    }
+  }
+
+  private get debugInfo() {
+    return {
+      initialized: this.initialized,
+      hasConnection: !!this.connection,
+      processRunning: !!this.serverProcess?.pid,
+      documentsTracked: Array.from(this.documentVersions.keys()),
+      activeHandlers: Array.from(this.diagnosticHandlers.keys()),
+    };
+  }
+
+  /**
+   * Validates a document
+   */
+  async validateDocument(uri: string, content: string): Promise<Diagnostic[]> {
+    if (!this.connection || !this.initialized) {
+      throw new TypeScriptServerError(
+        'Server not initialized',
+        'NOT_INITIALIZED'
+      );
+    }
+
+    const normalizedUri = this.normalizeUri(uri);
+
+    this.logger.debug('Starting validation', {
+      uri: normalizedUri,
+      serverState: this.debugInfo,
+    });
+
+    return new Promise<Diagnostic[]>(async (resolve, reject) => {
+      try {
+        let resolvedDiagnostics = false;
+
+        const diagnosticCallback = (params: {
+          uri: string;
+          diagnostics: Diagnostic[];
+        }) => {
+          this.logger.debug('Comparing URIs:', {
+            received: params.uri,
+            expected: normalizedUri,
+          });
+
+          if (params.uri === normalizedUri) {
+            resolvedDiagnostics = true;
+            this.logger.debug('Received diagnostics', {
+              uri: normalizedUri,
+              diagnosticsCount: params.diagnostics.length,
+              diagnostics: params.diagnostics,
+            });
+            resolve(params.diagnostics);
+          }
+        };
+
+        // Add handler for diagnostic notifications
+        const handlers = this.diagnosticHandlers.get(normalizedUri) || [];
+        handlers.push(diagnosticCallback);
+        this.diagnosticHandlers.set(normalizedUri, handlers);
+
+        // Ensure document is opened with normalized URI
+        const version = this.documentVersions.get(normalizedUri) || 1;
+        await this.didOpen(normalizedUri, content, version);
+
+        this.logger.debug('Document opened', { uri: normalizedUri, version });
+
+        if (!this.connection) {
+          throw new TypeScriptServerError(
+            'Connection not established',
+            'CONNECTION_FAILED'
+          );
         }
 
-        // @ts-ignore
-        const index = handlers.indexOf(handler);
-        if (index > -1) {
-          // @ts-ignore
-          handlers.splice(index, 1);
-        }
-        if (handlers.length === 0) {
-          this.diagnosticHandlers.delete(uri);
-        } else {
-          // @ts-ignore
-          this.diagnosticHandlers.set(uri, handlers);
-        }
-        resolve(diagnostics);
-      };
+        // Send a change to trigger validation
+        await this.connection.sendNotification(
+          DidChangeTextDocumentNotification.type,
+          {
+            textDocument: {
+              uri: normalizedUri,
+              version: version + 1,
+            },
+            contentChanges: [{ text: content }],
+          }
+        );
 
-      // Register handler
-      const handlers = this.diagnosticHandlers.get(uri) || [];
+        this.documentVersions.set(normalizedUri, version + 1);
+        this.logger.debug('Change notification sent', {
+          uri: normalizedUri,
+          newVersion: version + 1,
+        });
 
-      if (!handlers || !Array.isArray(handlers)) {
-        this.logger.error('No handlers found for URI');
-        reject(new Error('No handlers found for URI'));
-        return;
+        // Set timeout
+        setTimeout(() => {
+          if (!resolvedDiagnostics) {
+            this.logger.error('Validation timeout', {
+              uri: normalizedUri,
+              serverState: this.debugInfo,
+            });
+            reject(new Error('Validation timeout'));
+
+            // Clean up handler
+            const currentHandlers = this.diagnosticHandlers.get(normalizedUri);
+            if (currentHandlers) {
+              const index = currentHandlers.indexOf(diagnosticCallback);
+              if (index > -1) {
+                currentHandlers.splice(index, 1);
+              }
+              if (currentHandlers.length === 0) {
+                this.diagnosticHandlers.delete(normalizedUri);
+              } else {
+                this.diagnosticHandlers.set(normalizedUri, currentHandlers);
+              }
+            }
+          }
+        }, 3000);
+      } catch (error) {
+        this.logger.error('Validation error', error as Error, {
+          uri: normalizedUri,
+          serverState: this.debugInfo,
+        });
+        reject(error);
       }
-
-      // @ts-ignore
-      handlers.push(handler);
-      // @ts-ignore
-      this.diagnosticHandlers.set(uri, handlers);
-
-      // Set timeout to prevent hanging
-      const timeoutId = setTimeout(() => {
-        handler([]);
-      }, 2000);
-
-      this.logger.debug('Requested document validation', { uri });
     });
   }
 

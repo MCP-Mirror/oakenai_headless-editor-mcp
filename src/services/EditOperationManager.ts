@@ -33,12 +33,14 @@ export class EditOperationManager {
     operation: EditOperation
   ): Promise<EditResult> {
     try {
-      // Get session
       const session = await this.sessionManager.getSession(sessionId);
       const { document, languageId } = session;
 
       // Create edit
       const edit = await this.createEdit(document, operation);
+
+      // Validate operation
+      await this.validateOperation(operation);
 
       // Apply edit to document
       const newContent = TextDocument.applyEdits(document, [edit]);
@@ -52,17 +54,22 @@ export class EditOperationManager {
         newContent
       );
 
-      // Validate changes
-      const diagnostics = await this.lspManager.validateDocument(
-        document.uri,
-        newContent,
-        languageId
-      );
-
       // Update session with new document
       await this.sessionManager.updateSession(sessionId, {
         document: updatedDoc,
       });
+
+      // Get language server
+      const server = await this.lspManager.getServer(languageId);
+
+      // Notify language server of the change
+      await server.didChange(document.uri, [edit], newVersion);
+
+      // Wait for validation results
+      const diagnostics = await server.validateDocument(
+        document.uri,
+        newContent
+      );
 
       const success = diagnostics.length === 0;
 
@@ -71,6 +78,8 @@ export class EditOperationManager {
         operationType: operation.type,
         success,
         diagnosticsCount: diagnostics.length,
+        hasErrors: diagnostics.some((d) => d.severity === 1), // 1 is error severity
+        diagnostics, // Include actual diagnostics in log
       });
 
       return {
@@ -79,20 +88,20 @@ export class EditOperationManager {
         changes: [edit],
       };
     } catch (error) {
-      this.logger.error('Failed to apply edit', error as Error, {
-        sessionId,
-        operation,
-      });
-
-      if (error instanceof EditError) {
-        throw error;
+      if (error instanceof Error && error.message === 'Validation timeout') {
+        // Return validation timeout as a regular result with error info
+        return {
+          success: false,
+          diagnostics: [],
+          error: {
+            message: 'Validation timeout',
+            code: 'VALIDATION_TIMEOUT',
+            details: { sessionId, operation },
+          },
+        };
       }
 
-      throw new EditError(
-        'Failed to apply edit operation',
-        'OPERATION_FAILED',
-        { sessionId, operation, error }
-      );
+      throw error;
     }
   }
 

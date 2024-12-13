@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { HeadlessEditorServer } from './server.js';
-import { logger } from './utils/logger.js';
 
 // Command line argument parsing
 const args = process.argv.slice(2);
@@ -12,7 +11,7 @@ if (args.length === 0) {
 }
 
 // Start server
-const server = new HeadlessEditorServer(args, logger);
+const server = new HeadlessEditorServer(args);
 server.start().catch((error) => {
   console.error('Fatal error starting server:', error);
   process.exit(1);

@@ -1,4 +1,5 @@
 // src/types/lsp.ts
+
 import {
   Diagnostic,
   Location,
@@ -22,9 +23,6 @@ export interface TypeScriptServerInitializationOptions {
   preferences?: TypeScriptPreferences;
 }
 
-/**
- * Service for managing LSP servers
- */
 export interface LSPManager {
   startServer(languageId: string): Promise<void>;
   stopServer(languageId: string): Promise<void>;
@@ -36,16 +34,29 @@ export interface LSPManager {
   ): Promise<Diagnostic[]>;
 }
 
-/**
- * Represents a language server instance
- */
 export interface LanguageServer {
+  // Lifecycle
   initialize(): Promise<void>;
   shutdown(): Promise<void>;
+
+  // Document sync
+  didOpen(uri: string, content: string, version: number): Promise<void>;
+  didChange(uri: string, changes: TextEdit[], version: number): Promise<void>;
+  didClose(uri: string): Promise<void>;
+
+  // Features
   validateDocument(uri: string, content: string): Promise<Diagnostic[]>;
   formatDocument(uri: string, content: string): Promise<TextEdit[]>;
   getDefinition(
     uri: string,
     position: Position
   ): Promise<Location[] | LocationLink[]>;
+}
+
+export interface DiagnosticHandler {
+  (diagnostics: Diagnostic[]): void;
+}
+
+export interface DiagnosticHandlers {
+  [uri: string]: DiagnosticHandler[];
 }

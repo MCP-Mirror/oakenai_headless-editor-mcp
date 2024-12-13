@@ -73,13 +73,18 @@ export class EditOperationManager {
 
       const success = diagnostics.length === 0;
 
+      const errorCount = diagnostics.filter((d) => d.severity === 1).length;
+      const warningCount = diagnostics.filter((d) => d.severity === 2).length;
+
       this.logger.info('Applied edit operation', {
         sessionId,
         operationType: operation.type,
         success,
-        diagnosticsCount: diagnostics.length,
-        hasErrors: diagnostics.some((d) => d.severity === 1), // 1 is error severity
-        diagnostics, // Include actual diagnostics in log
+        summary: {
+          total: diagnostics.length,
+          errors: errorCount,
+          warnings: warningCount,
+        },
       });
 
       return {

@@ -67,19 +67,31 @@ async function runTest(
   console.log(`\n=== Testing: ${testName} ===`);
   try {
     const result = await action();
-    console.log('Result:', result.content[0].text);
+    // console.log('Result:', result.content[0].text);
     const parsedResult = JSON.parse(result.content[0].text);
     
     if (result.isError || (parsedResult.error && !testName.includes('Error'))) {
       console.error("Test failed:", parsedResult);
+      const {diagnostics, ...rest} = parsedResult;
+      console.error(JSON.stringify(rest, null, 2));
+      if (diagnostics) {
+        console.error("\nDiagnostics:");
+        console.error(JSON.stringify(diagnostics, null, 2));
+      }
       return null;
     }
+
+    console.log("Test success:");
+    console.log(JSON.stringify(parsedResult, null, 2));
+
     return parsedResult;
   } catch (error) {
     console.error('Test error:', error);
     return null;
   }
 }
+
+
 
 async function cleanup(client: Client, sessionId?: string, fixturesDir?: string) {
   if (sessionId) {
@@ -154,52 +166,45 @@ async function main() {
       console.log("Session ID:", sessionId);
     }
 
-    if (sessionId) {
-      // Test 2: Edit with intentional error
-      const editResult = await runTest(client, "Edit Code with Error", async () => {
-        return client.request({
-          method: "tools/call",
-          params: {
-            name: "edit_code",
-            arguments: {
-              sessionId,
-              operation: {
-                type: "insert",
-                content: "\n  vari ant:? 'small' | 'medium' | 'large';\n",
-                position: {
-                  line: 5,
-                  character: 0
-                }
+    if (!sessionId) {
+      console.error("Session ID not found");
+      return;
+    }
+    
+    // Test 2: Edit with intentional error
+    const editResult = await runTest(client, "Edit Code with Error", async () => {
+      return client.request({
+        method: "tools/call",
+        params: {
+          name: "edit_code",
+          arguments: {
+            sessionId,
+            operation: {
+              type: "insert",
+              //content: "\n  size?: 'small' | 'medium' | 'large';\n",
+              content: " // comment",
+              position: {
+                line: 5,
+                character: 100
               }
             }
-          },
-        }, ToolResultSchema);
-      });
-
-      // Test 3: Validate code
-      const validateResult = await runTest(client, "Validate Code", async () => {
-        return client.request({
-          method: "tools/call",
-          params: {
-            name: "validate_code",
-            arguments: {
-              sessionId
-            }
           }
-        }, ToolResultSchema);
-      });
+        },
+      }, ToolResultSchema);
+    });
 
-      // Print final results
-      console.log("\nTest Results:");
-      console.log("Session created:", !!sessionResult);
-      console.log("Edit applied:", !!editResult);
-      console.log("Validation completed:", !!validateResult);
-      
-      // if (validateResult?.diagnostics) {
-      //   console.log("\nDiagnostics:");
-      //   console.log(JSON.stringify(validateResult.diagnostics, null, 2));
-      // }
-    }
+    // Test 3: Validate code
+    const validateResult = await runTest(client, "Validate Code", async () => {
+      return client.request({
+        method: "tools/call",
+        params: {
+          name: "validate_code",
+          arguments: {
+            sessionId
+          }
+        }
+      }, ToolResultSchema);
+    });
 
   } catch (error) {
     console.error("Error:", error);

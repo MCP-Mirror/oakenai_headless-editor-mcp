@@ -539,10 +539,13 @@ export class TypeScriptServer {
 
     const normalizedUri = this.normalizeUri(uri);
 
-    this.logger.debug('Starting validation', {
-      uri: normalizedUri,
-      serverState: this.debugInfo,
-    });
+    // Only log the URI mapping once when it's first seen
+    if (!this.normalizedUris.has(uri)) {
+      this.logger.debug('URI mapping', {
+        original: uri,
+        normalized: normalizedUri,
+      });
+    }
 
     return new Promise<Diagnostic[]>(async (resolve, reject) => {
       try {
@@ -552,17 +555,14 @@ export class TypeScriptServer {
           uri: string;
           diagnostics: Diagnostic[];
         }) => {
-          this.logger.debug('Comparing URIs:', {
-            received: params.uri,
-            expected: normalizedUri,
-          });
-
           if (params.uri === normalizedUri) {
             resolvedDiagnostics = true;
+            // Only log diagnostic count, not full diagnostics
             this.logger.debug('Received diagnostics', {
               uri: normalizedUri,
               diagnosticsCount: params.diagnostics.length,
-              diagnostics: params.diagnostics,
+              errorCount: params.diagnostics.filter((d) => d.severity === 1)
+                .length,
             });
             resolve(params.diagnostics);
           }
@@ -573,16 +573,14 @@ export class TypeScriptServer {
         handlers.push(diagnosticCallback);
         this.diagnosticHandlers.set(normalizedUri, handlers);
 
-        // Ensure document is opened with normalized URI
+        // Ensure document is opened
         const version = this.documentVersions.get(normalizedUri) || 1;
         await this.didOpen(normalizedUri, content, version);
 
-        this.logger.debug('Document opened', { uri: normalizedUri, version });
-
         if (!this.connection) {
           throw new TypeScriptServerError(
-            'Connection not established',
-            'CONNECTION_FAILED'
+            'Server not initialized',
+            'NOT_INITIALIZED'
           );
         }
 
@@ -599,17 +597,17 @@ export class TypeScriptServer {
         );
 
         this.documentVersions.set(normalizedUri, version + 1);
-        this.logger.debug('Change notification sent', {
-          uri: normalizedUri,
-          newVersion: version + 1,
-        });
 
         // Set timeout
         setTimeout(() => {
           if (!resolvedDiagnostics) {
             this.logger.error('Validation timeout', {
               uri: normalizedUri,
-              serverState: this.debugInfo,
+              serverInfo: {
+                initialized: this.initialized,
+                hasHandlers: (this.diagnosticHandlers.get(normalizedUri) || [])
+                  .length,
+              },
             });
             reject(new Error('Validation timeout'));
 
@@ -622,17 +620,12 @@ export class TypeScriptServer {
               }
               if (currentHandlers.length === 0) {
                 this.diagnosticHandlers.delete(normalizedUri);
-              } else {
-                this.diagnosticHandlers.set(normalizedUri, currentHandlers);
               }
             }
           }
         }, 3000);
       } catch (error) {
-        this.logger.error('Validation error', error as Error, {
-          uri: normalizedUri,
-          serverState: this.debugInfo,
-        });
+        this.logger.error('Validation error', error as Error);
         reject(error);
       }
     });

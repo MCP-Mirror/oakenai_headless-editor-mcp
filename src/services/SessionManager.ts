@@ -3,9 +3,9 @@
 import { v4 as uuidv4 } from 'uuid';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { EditSession } from '../types/editor.js';
-import { Logger } from '../utils/logger.js';
 import { SessionError } from '../types/errors.js';
 import { FileSystemManager } from '../utils/fs.js';
+import { Logger } from '../utils/logger.js';
 
 export class SessionManager {
   private sessions: Map<string, EditSession>;
@@ -15,7 +15,7 @@ export class SessionManager {
   constructor(
     private readonly fs: FileSystemManager,
     private logger: Logger,
-    private readonly allowedDirectories: string[],
+    private readonly allowedDirectories: string[]
   ) {
     this.logger = logger;
     this.sessions = new Map();
@@ -29,11 +29,17 @@ export class SessionManager {
    * @returns The created session
    * @throws {SessionError} If session creation fails
    */
-  async createSession(filePath: string, languageId: string): Promise<EditSession> {
+  async createSession(
+    filePath: string,
+    languageId: string
+  ): Promise<EditSession> {
     try {
       // Validate file path is within allowed directories
-      const validatedPath = await this.fs.validatePath(filePath, this.allowedDirectories);
-      
+      const validatedPath = await this.fs.validatePath(
+        filePath,
+        this.allowedDirectories
+      );
+
       // Check if file exists
       const exists = await this.fs.exists(validatedPath);
       if (!exists) {
@@ -62,7 +68,7 @@ export class SessionManager {
         document,
         languageId,
         createdAt: Date.now(),
-        lastActivity: Date.now()
+        lastActivity: Date.now(),
       };
 
       this.sessions.set(sessionId, session);
@@ -70,25 +76,24 @@ export class SessionManager {
       this.logger.info('Created new edit session', {
         sessionId,
         filePath: validatedPath,
-        languageId
+        languageId,
       });
 
       return session;
     } catch (error) {
       this.logger.error('Failed to create session', error as Error, {
         filePath,
-        languageId
+        languageId,
       });
-      
+
       if (error instanceof SessionError) {
         throw error;
       }
-      
-      throw new SessionError(
-        'Failed to create edit session',
-        'CREATE_FAILED',
-        { filePath, error }
-      );
+
+      throw new SessionError('Failed to create edit session', 'CREATE_FAILED', {
+        filePath,
+        error,
+      });
     }
   }
 
@@ -101,12 +106,12 @@ export class SessionManager {
   async getSession(sessionId: string): Promise<EditSession> {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      this.logger.error('Session not found', new Error('Session not found'), { sessionId });
-      throw new SessionError(
-        `Session not found: ${sessionId}`,
-        'NOT_FOUND',
-        { sessionId }
-      );
+      this.logger.error('Session not found', new Error('Session not found'), {
+        sessionId,
+      });
+      throw new SessionError(`Session not found: ${sessionId}`, 'NOT_FOUND', {
+        sessionId,
+      });
     }
 
     // Update last activity
@@ -133,19 +138,19 @@ export class SessionManager {
         ...session,
         ...changes,
         id: sessionId, // Ensure ID cannot be changed
-        lastActivity: Date.now()
+        lastActivity: Date.now(),
       };
 
       this.sessions.set(sessionId, updatedSession);
 
       this.logger.debug('Updated session', {
         sessionId,
-        changes
+        changes,
       });
     } catch (error) {
       this.logger.error('Failed to update session', error as Error, {
         sessionId,
-        changes
+        changes,
       });
       throw error;
     }
@@ -165,7 +170,9 @@ export class SessionManager {
 
       this.logger.info('Closed session', { sessionId });
     } catch (error) {
-      this.logger.error('Failed to close session', error as Error, { sessionId });
+      this.logger.error('Failed to close session', error as Error, {
+        sessionId,
+      });
       throw error;
     }
   }
@@ -176,14 +183,18 @@ export class SessionManager {
    */
   async cleanupInactiveSessions(maxInactiveTime: number): Promise<void> {
     const now = Date.now();
-    
+
     for (const [sessionId, session] of this.sessions.entries()) {
       if (now - session.lastActivity > maxInactiveTime) {
         try {
           await this.closeSession(sessionId);
           this.logger.info('Cleaned up inactive session', { sessionId });
         } catch (error) {
-          this.logger.error('Failed to cleanup inactive session', error as Error, { sessionId });
+          this.logger.error(
+            'Failed to cleanup inactive session',
+            error as Error,
+            { sessionId }
+          );
         }
       }
     }
@@ -218,13 +229,13 @@ export class SessionManager {
    */
   async dispose(): Promise<void> {
     this.stopCleanupInterval();
-    
+
     // Close all active sessions
     const sessionIds = Array.from(this.sessions.keys());
     await Promise.all(
-      sessionIds.map(sessionId => this.closeSession(sessionId))
+      sessionIds.map((sessionId) => this.closeSession(sessionId))
     );
-    
+
     this.logger.info('Disposed session manager');
   }
 }

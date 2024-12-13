@@ -6,17 +6,22 @@ export enum LogLevel {
   DEBUG = 'debug',
   INFO = 'info',
   WARN = 'warn',
-  ERROR = 'error'
+  ERROR = 'error',
 }
 
 /**
  * Interface for system logging
  */
 export interface Logger {
+  log(message: string, level?: LogLevel): void;
   debug(message: string, context?: Record<string, unknown>): void;
   info(message: string, context?: Record<string, unknown>): void;
   warn(message: string, context?: Record<string, unknown>): void;
-  error(message: string, error?: Error, context?: Record<string, unknown>): void;
+  error(
+    message: string,
+    error?: Error,
+    context?: Record<string, unknown>
+  ): void;
   setLevel(level: LogLevel): void;
 }
 
@@ -26,13 +31,13 @@ export interface Logger {
 interface LoggerOptions {
   /** Minimum log level to output */
   minLevel?: LogLevel;
-  
+
   /** Whether to include timestamps */
   timestamps?: boolean;
-  
+
   /** Whether to include log level in output */
   showLevel?: boolean;
-  
+
   /** Custom output function (defaults to console) */
   output?: (message: string) => void;
 }
@@ -82,7 +87,7 @@ export class SystemLogger implements Logger {
       [LogLevel.DEBUG]: 0,
       [LogLevel.INFO]: 1,
       [LogLevel.WARN]: 2,
-      [LogLevel.ERROR]: 3
+      [LogLevel.ERROR]: 3,
     };
 
     return levels[level] >= levels[this.level];
@@ -110,37 +115,32 @@ export class SystemLogger implements Logger {
   /**
    * Outputs a log message if it meets the minimum level requirement
    */
-  private log(level: LogLevel, message: string): void {
-    if (this.shouldLog(level)) {
-      this.output(this.formatMessage(level, message));
+  log(message: string, level?: LogLevel): void {
+    if (this.shouldLog(level ?? LogLevel.INFO)) {
+      this.output(this.formatMessage(level ?? LogLevel.INFO, message));
     }
   }
 
   debug(message: string, context?: Record<string, unknown>): void {
-    this.log(
-      LogLevel.DEBUG,
-      `${message}${formatContext(context)}`
-    );
+    this.log(`${message}${formatContext(context)}`, LogLevel.DEBUG);
   }
 
   info(message: string, context?: Record<string, unknown>): void {
-    this.log(
-      LogLevel.INFO,
-      `${message}${formatContext(context)}`
-    );
+    this.log(`${message}${formatContext(context)}`, LogLevel.INFO);
   }
 
   warn(message: string, context?: Record<string, unknown>): void {
-    this.log(
-      LogLevel.WARN,
-      `${message}${formatContext(context)}`
-    );
+    this.log(`${message}${formatContext(context)}`, LogLevel.WARN);
   }
 
-  error(message: string, error?: Error, context?: Record<string, unknown>): void {
+  error(
+    message: string,
+    error?: Error,
+    context?: Record<string, unknown>
+  ): void {
     this.log(
-      LogLevel.ERROR,
-      `${message}${error ? formatError(error) : ''}${formatContext(context)}`
+      `${message}${error ? formatError(error) : ''}${formatContext(context)}`,
+      LogLevel.ERROR
     );
   }
 }
@@ -152,6 +152,7 @@ export class NoopLogger implements Logger {
   debug(): void {}
   info(): void {}
   warn(): void {}
+  log(): void {}
   error(): void {}
   setLevel(): void {}
 }
@@ -160,7 +161,8 @@ export class NoopLogger implements Logger {
  * Default logger instance for the system
  */
 export const logger = new SystemLogger({
-  minLevel: process.env.NODE_ENV === 'production' ? LogLevel.INFO : LogLevel.DEBUG,
+  minLevel:
+    process.env.NODE_ENV === 'production' ? LogLevel.INFO : LogLevel.DEBUG,
   timestamps: true,
-  showLevel: true
+  showLevel: true,
 });

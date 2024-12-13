@@ -1,10 +1,10 @@
 // src/services/__tests__/SessionManager.test.ts
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { SessionManager } from '../services/SessionManager.js';
+import { EditSession } from '../types/editor.js';
+import { SessionError } from '../types/errors.js';
 import { FileSystemManager } from '../utils/fs.js';
 import { Logger } from '../utils/logger.js';
-import { SessionError } from '../types/errors.js';
-import { EditSession } from '../types/editor.js';
 
 // Mock implementations
 const mockFs: jest.Mocked<FileSystemManager> = {
@@ -20,6 +20,7 @@ const mockFs: jest.Mocked<FileSystemManager> = {
 const mockLogger: jest.Mocked<Logger> = {
   debug: jest.fn(),
   info: jest.fn(),
+  log: jest.fn(),
   warn: jest.fn(),
   error: jest.fn(),
   setLevel: jest.fn(),
@@ -34,7 +35,7 @@ describe('SessionManager', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     sessionManager = new SessionManager(mockFs, mockLogger, allowedDirectories);
-    
+
     // Default mock implementations
     mockFs.validatePath.mockImplementation(async (path) => {
       if (path.startsWith('/allowed/path')) {
@@ -42,7 +43,7 @@ describe('SessionManager', () => {
       }
       throw new Error('Invalid path');
     });
-    
+
     mockFs.exists.mockResolvedValue(true);
     mockFs.readFile.mockResolvedValue('// Test content');
   });
@@ -53,7 +54,10 @@ describe('SessionManager', () => {
 
   describe('createSession', () => {
     it('should create a new session successfully', async () => {
-      const session = await sessionManager.createSession(validFilePath, 'typescript');
+      const session = await sessionManager.createSession(
+        validFilePath,
+        'typescript'
+      );
 
       expect(session).toBeDefined();
       expect(session.id).toBeDefined();
@@ -63,7 +67,10 @@ describe('SessionManager', () => {
       expect(session.createdAt).toBeDefined();
       expect(session.lastActivity).toBeDefined();
 
-      expect(mockFs.validatePath).toHaveBeenCalledWith(validFilePath, allowedDirectories);
+      expect(mockFs.validatePath).toHaveBeenCalledWith(
+        validFilePath,
+        allowedDirectories
+      );
       expect(mockFs.exists).toHaveBeenCalledWith(validFilePath);
       expect(mockFs.readFile).toHaveBeenCalledWith(validFilePath);
       expect(mockLogger.info).toHaveBeenCalled();
@@ -102,7 +109,10 @@ describe('SessionManager', () => {
     let testSession: EditSession;
 
     beforeEach(async () => {
-      testSession = await sessionManager.createSession(validFilePath, 'typescript');
+      testSession = await sessionManager.createSession(
+        validFilePath,
+        'typescript'
+      );
     });
 
     it('should retrieve an existing session', async () => {
@@ -110,7 +120,9 @@ describe('SessionManager', () => {
 
       expect(session).toBeDefined();
       expect(session.id).toBe(testSession.id);
-      expect(session.lastActivity).toBeGreaterThanOrEqual(testSession.lastActivity);
+      expect(session.lastActivity).toBeGreaterThanOrEqual(
+        testSession.lastActivity
+      );
     });
 
     it('should throw error for non-existent session', async () => {
@@ -126,7 +138,10 @@ describe('SessionManager', () => {
     let testSession: EditSession;
 
     beforeEach(async () => {
-      testSession = await sessionManager.createSession(validFilePath, 'typescript');
+      testSession = await sessionManager.createSession(
+        validFilePath,
+        'typescript'
+      );
     });
 
     it('should update session with new document', async () => {
@@ -138,12 +153,14 @@ describe('SessionManager', () => {
       );
 
       await sessionManager.updateSession(testSession.id, {
-        document: newDocument
+        document: newDocument,
       });
 
       const updatedSession = await sessionManager.getSession(testSession.id);
       expect(updatedSession.document).toBe(newDocument);
-      expect(updatedSession.lastActivity).toBeGreaterThanOrEqual(testSession.lastActivity);
+      expect(updatedSession.lastActivity).toBeGreaterThanOrEqual(
+        testSession.lastActivity
+      );
     });
 
     it('should throw error when updating non-existent session', async () => {
@@ -157,7 +174,7 @@ describe('SessionManager', () => {
     it('should not allow updating session id', async () => {
       const originalId = testSession.id;
       await sessionManager.updateSession(originalId, {
-        id: 'new-id'
+        id: 'new-id',
       } as any);
 
       const session = await sessionManager.getSession(originalId);
@@ -169,15 +186,18 @@ describe('SessionManager', () => {
     let testSession: EditSession;
 
     beforeEach(async () => {
-      testSession = await sessionManager.createSession(validFilePath, 'typescript');
+      testSession = await sessionManager.createSession(
+        validFilePath,
+        'typescript'
+      );
     });
 
     it('should close session successfully', async () => {
       await sessionManager.closeSession(testSession.id);
 
-      await expect(
-        sessionManager.getSession(testSession.id)
-      ).rejects.toThrow(SessionError);
+      await expect(sessionManager.getSession(testSession.id)).rejects.toThrow(
+        SessionError
+      );
 
       expect(mockLogger.info).toHaveBeenCalled();
     });
@@ -195,7 +215,10 @@ describe('SessionManager', () => {
     let testSession: EditSession;
 
     beforeEach(async () => {
-      testSession = await sessionManager.createSession(validFilePath, 'typescript');
+      testSession = await sessionManager.createSession(
+        validFilePath,
+        'typescript'
+      );
     });
 
     it('should cleanup inactive sessions', async () => {
@@ -206,9 +229,9 @@ describe('SessionManager', () => {
 
       await sessionManager.cleanupInactiveSessions(1000 * 60 * 30); // 30 minutes
 
-      await expect(
-        sessionManager.getSession(testSession.id)
-      ).rejects.toThrow(SessionError);
+      await expect(sessionManager.getSession(testSession.id)).rejects.toThrow(
+        SessionError
+      );
 
       expect(mockLogger.info).toHaveBeenCalledWith(
         'Cleaned up inactive session',
@@ -220,10 +243,10 @@ describe('SessionManager', () => {
 
     it('should not cleanup active sessions', async () => {
       jest.useFakeTimers();
-      
+
       // Update session to keep it active
       await sessionManager.updateSession(testSession.id, {});
-      
+
       // Fast-forward time but less than cleanup threshold
       jest.advanceTimersByTime(1000 * 60 * 15); // 15 minutes
 
@@ -240,14 +263,24 @@ describe('SessionManager', () => {
   describe('dispose', () => {
     it('should cleanup all sessions and resources', async () => {
       // Create multiple sessions
-      const session1 = await sessionManager.createSession(validFilePath, 'typescript');
-      const session2 = await sessionManager.createSession(validFilePath, 'typescript');
+      const session1 = await sessionManager.createSession(
+        validFilePath,
+        'typescript'
+      );
+      const session2 = await sessionManager.createSession(
+        validFilePath,
+        'typescript'
+      );
 
       await sessionManager.dispose();
 
       // Verify all sessions are closed
-      await expect(sessionManager.getSession(session1.id)).rejects.toThrow(SessionError);
-      await expect(sessionManager.getSession(session2.id)).rejects.toThrow(SessionError);
+      await expect(sessionManager.getSession(session1.id)).rejects.toThrow(
+        SessionError
+      );
+      await expect(sessionManager.getSession(session2.id)).rejects.toThrow(
+        SessionError
+      );
 
       expect(mockLogger.info).toHaveBeenCalledWith('Disposed session manager');
     });

@@ -1,5 +1,5 @@
 // src/utils/__tests__/logger.test.ts
-import { SystemLogger, NoopLogger, LogLevel } from '../utils/logger.js';
+import { LogLevel, NoopLogger, SystemLogger } from '../utils/logger.js';
 
 describe('SystemLogger', () => {
   let outputMock: jest.Mock;
@@ -7,7 +7,7 @@ describe('SystemLogger', () => {
 
   beforeEach(() => {
     outputMock = jest.fn();
-    logger = new SystemLogger({ 
+    logger = new SystemLogger({
       output: outputMock,
       timestamps: false, // Disable timestamps for easier testing
     });
@@ -26,10 +26,18 @@ describe('SystemLogger', () => {
       logger.warn('Warning message');
       logger.error('Error message');
 
-      expect(outputMock).not.toHaveBeenCalledWith(expect.stringContaining('Debug message'));
-      expect(outputMock).not.toHaveBeenCalledWith(expect.stringContaining('Info message'));
-      expect(outputMock).toHaveBeenCalledWith(expect.stringContaining('Warning message'));
-      expect(outputMock).toHaveBeenCalledWith(expect.stringContaining('Error message'));
+      expect(outputMock).not.toHaveBeenCalledWith(
+        expect.stringContaining('Debug message')
+      );
+      expect(outputMock).not.toHaveBeenCalledWith(
+        expect.stringContaining('Info message')
+      );
+      expect(outputMock).toHaveBeenCalledWith(
+        expect.stringContaining('Warning message')
+      );
+      expect(outputMock).toHaveBeenCalledWith(
+        expect.stringContaining('Error message')
+      );
     });
 
     it('should output all levels when set to DEBUG', () => {
@@ -50,7 +58,9 @@ describe('SystemLogger', () => {
       logger.info('Message with context', context);
 
       expect(outputMock).toHaveBeenCalledWith(
-        expect.stringContaining('Message with context\nContext: {\n  "key": "value"\n}')
+        expect.stringContaining(
+          'Message with context\nContext: {\n  "key": "value"\n}'
+        )
       );
     });
 
@@ -64,15 +74,17 @@ describe('SystemLogger', () => {
     });
 
     it('should include timestamps when enabled', () => {
-      logger = new SystemLogger({ 
+      logger = new SystemLogger({
         output: outputMock,
-        timestamps: true 
+        timestamps: true,
       });
 
       logger.info('Test message');
 
       expect(outputMock).toHaveBeenCalledWith(
-        expect.stringMatching(/\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.*\].*Test message/)
+        expect.stringMatching(
+          /\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.*\].*Test message/
+        )
       );
     });
   });
@@ -85,7 +97,7 @@ describe('NoopLogger', () => {
 
     logger.debug();
     logger.info();
-    logger.warn();  
+    logger.warn();
     logger.error();
     logger.setLevel();
 

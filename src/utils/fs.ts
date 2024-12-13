@@ -1,7 +1,7 @@
 // src/utils/fs.ts
 import fs from 'fs/promises';
 import path from 'path';
-import { FileSystemError } from '../types/errors.js'
+import { FileSystemError } from '../types/errors.js';
 
 export interface FileSystemManager {
   readFile(path: string): Promise<string>;

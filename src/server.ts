@@ -8,9 +8,8 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { LocalFileSystemManager } from './utils/fs.js';
 import { BaseError } from './types/errors.js';
-
+import { LocalFileSystemManager } from './utils/fs.js';
 
 export class HeadlessEditorServer {
   private readonly server: Server;
@@ -31,7 +30,6 @@ export class HeadlessEditorServer {
     });
 
     this.fs = new LocalFileSystemManager();
-
 
     this.server = new Server(
       {
@@ -55,9 +53,7 @@ export class HeadlessEditorServer {
         {
           name: 'start_session',
           description: 'Start a new editing session for a file',
-          inputSchema: {
-           
-          },
+          inputSchema: {},
         },
       ],
     }));
@@ -69,21 +65,20 @@ export class HeadlessEditorServer {
         switch (name) {
           case 'start_session': {
             // TODO: implement this
-           return {
-            content: [
-              {
-                type: 'text',
-                text: 'Session started',
-              },
-            ],
-          };
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: 'Session started',
+                },
+              ],
+            };
           }
 
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
       } catch (error) {
-
         if (error instanceof BaseError) {
           return {
             content: [
@@ -99,7 +94,7 @@ export class HeadlessEditorServer {
             isError: true,
           };
         }
-        
+
         return {
           content: [
             {

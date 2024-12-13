@@ -1,7 +1,12 @@
 // src/types/index.ts
 
+import {
+  Diagnostic,
+  Position,
+  Range,
+  TextEdit,
+} from 'vscode-languageserver-protocol';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { Range, Position, TextEdit, Diagnostic } from 'vscode-languageserver-protocol';
 
 /**
  * Represents a session for editing code
@@ -9,19 +14,19 @@ import { Range, Position, TextEdit, Diagnostic } from 'vscode-languageserver-pro
 export interface EditSession {
   /** Unique identifier for the session */
   id: string;
-  
+
   /** Path to the file being edited */
   filePath: string;
-  
+
   /** Current document state */
   document: TextDocument;
-  
+
   /** Language identifier (e.g., 'typescript', 'python') */
   languageId: string;
-  
+
   /** Creation timestamp */
   createdAt: number;
-  
+
   /** Last activity timestamp */
   lastActivity: number;
 }
@@ -32,13 +37,13 @@ export interface EditSession {
 export interface CodeTarget {
   /** Type of target (e.g., 'symbol', 'component', 'function') */
   type: CodeTargetType;
-  
+
   /** Name of the target (e.g., component name, function name) */
   name?: string;
-  
+
   /** Specific range in the document */
   range?: Range;
-  
+
   /** Additional target properties */
   properties?: Record<string, unknown>;
 }
@@ -46,9 +51,9 @@ export interface CodeTarget {
 /**
  * Valid code target types
  */
-export type CodeTargetType = 
-  | 'symbol' 
-  | 'component' 
+export type CodeTargetType =
+  | 'symbol'
+  | 'component'
   | 'function'
   | 'class'
   | 'interface'
@@ -61,14 +66,14 @@ export type CodeTargetType =
 export interface EditOperation {
   /** Type of edit operation */
   type: EditOperationType;
-  
+
   /** Content to insert or replace */
   content?: string;
-  
+
   /** Position or range information */
   position?: Position;
   range?: Range;
-  
+
   /** Format preservation options */
   format?: FormatOptions;
 }
@@ -76,7 +81,7 @@ export interface EditOperation {
 /**
  * Valid edit operation types
  */
-export type EditOperationType = 
+export type EditOperationType =
   | 'insert'
   | 'delete'
   | 'replace'
@@ -92,10 +97,10 @@ export type EditOperationType =
 export interface FormatOptions {
   /** Whether to preserve indentation */
   preserveIndent?: boolean;
-  
+
   /** Whether to add trailing comma */
   trailingComma?: boolean;
-  
+
   /** Line ending style */
   lineEnding?: 'lf' | 'crlf';
 }
@@ -106,13 +111,13 @@ export interface FormatOptions {
 export interface EditResult {
   /** Whether the operation succeeded */
   success: boolean;
-  
+
   /** Any validation diagnostics */
   diagnostics: Diagnostic[];
-  
+
   /** Applied changes */
   changes?: TextEdit[];
-  
+
   /** Error details if operation failed */
   error?: {
     message: string;
@@ -127,12 +132,13 @@ export interface EditResult {
 export interface SessionManager {
   createSession(filePath: string, languageId: string): Promise<EditSession>;
   getSession(sessionId: string): Promise<EditSession>;
-  updateSession(sessionId: string, changes: Partial<EditSession>): Promise<void>;
+  updateSession(
+    sessionId: string,
+    changes: Partial<EditSession>
+  ): Promise<void>;
   closeSession(sessionId: string): Promise<void>;
   cleanupInactiveSessions(maxInactiveTime: number): Promise<void>;
 }
-
-
 
 /**
  * Log levels for the system
@@ -141,7 +147,7 @@ export enum LogLevel {
   DEBUG = 'debug',
   INFO = 'info',
   WARN = 'warn',
-  ERROR = 'error'
+  ERROR = 'error',
 }
 
 /**
@@ -151,6 +157,10 @@ export interface Logger {
   debug(message: string, context?: Record<string, unknown>): void;
   info(message: string, context?: Record<string, unknown>): void;
   warn(message: string, context?: Record<string, unknown>): void;
-  error(message: string, error?: Error, context?: Record<string, unknown>): void;
+  error(
+    message: string,
+    error?: Error,
+    context?: Record<string, unknown>
+  ): void;
   setLevel(level: LogLevel): void;
 }

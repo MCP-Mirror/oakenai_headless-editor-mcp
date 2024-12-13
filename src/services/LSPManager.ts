@@ -1,25 +1,22 @@
 // src/services/LSPManager.ts
-
 import { ChildProcess, spawn } from 'child_process';
 import {
   createProtocolConnection,
   DefinitionRequest,
   Diagnostic,
-  DidChangeTextDocumentNotification,
   DidCloseTextDocumentNotification,
   DidOpenTextDocumentNotification,
   DocumentFormattingRequest,
   InitializeParams,
   InitializeRequest,
-  Message,
-  MessageReader,
-  MessageWriter,
   Position,
   ProtocolConnection,
-  ReadableStreamMessageReader,
   TextEdit,
-  WriteableStreamMessageWriter,
 } from 'vscode-languageserver-protocol';
+import {
+  StreamMessageReader,
+  StreamMessageWriter,
+} from 'vscode-languageserver-protocol/node.js';
 import { Location } from 'vscode-languageserver-types';
 import { BaseError } from '../types/errors.js';
 import { LanguageServer, LSPManager } from '../types/lsp.js';
@@ -86,12 +83,14 @@ export class LSPManagerImpl implements LSPManager {
   private servers: Map<string, LanguageServer>;
   private configs: Map<string, LSPServerConfig>;
   private logger: Logger;
+  private processes: Map<string, ChildProcess>;
 
   constructor(
     logger: Logger,
     rootUri: string | null = null,
     workspaceFolders: string[] = []
   ) {
+    this.processes = new Map();
     this.servers = new Map();
     this.configs = new Map();
     this.logger = logger;
@@ -117,10 +116,17 @@ export class LSPManagerImpl implements LSPManager {
       );
     }
 
-    // @ts-ignore
-    const reader = new ReadableStreamMessageReader(process.stdout);
-    // @ts-ignore
-    const writer = new WriteableStreamMessageWriter(process.stdin);
+    const reader = new StreamMessageReader(process.stdout);
+    const writer = new StreamMessageWriter(process.stdin);
+
+    // Handle stream errors
+    reader.onError((error) => {
+      this.logger.error('LSP reader error', error);
+    });
+
+    writer.onError((error) => {
+      this.logger.error('LSP writer error', error);
+    });
 
     const connection = createProtocolConnection(reader, writer, this.logger);
 
@@ -176,6 +182,14 @@ export class LSPManagerImpl implements LSPManager {
     }
   }
 
+  private getServerPath(command: string): string {
+    try {
+      return require.resolve(command);
+    } catch {
+      return command; // Fallback to command name if not found in node_modules
+    }
+  }
+
   /**
    * Creates and initializes a language server instance
    */
@@ -183,12 +197,18 @@ export class LSPManagerImpl implements LSPManager {
     language: string,
     config: LSPServerConfig
   ): Promise<LanguageServer> {
-    const serverProcess = spawn(config.command, config.args);
+    const serverPath = this.getServerPath(config.command);
+    const serverProcess = spawn(serverPath, config.args);
     const connection = this.createConnection(serverProcess);
 
-    // Handle process errors
+    // Add error handler for the process
     serverProcess.on('error', (error) => {
       this.logger.error(`LSP server process error for ${language}`, error);
+      throw new LSPError(
+        `Failed to start LSP server for ${language}`,
+        'PROCESS_START_FAILED',
+        { language, error }
+      );
     });
 
     // Handle server exit
@@ -197,145 +217,176 @@ export class LSPManagerImpl implements LSPManager {
       this.servers.delete(language);
     });
 
-    // Initialize the server
-    const initializeParams: InitializeParams = {
-      processId: process.pid,
-      rootUri: config.rootUri,
-      workspaceFolders: config.workspaceFolders.map((folder) => ({
-        uri: folder,
-        name: folder.split('/').pop() || '',
-      })),
-      capabilities: {
-        textDocument: {
-          synchronization: {
-            dynamicRegistration: true,
-            willSave: true,
-            willSaveWaitUntil: true,
-            didSave: true,
-          },
-          completion: {
-            dynamicRegistration: true,
-            completionItem: {
-              snippetSupport: true,
-              documentationFormat: ['markdown', 'plaintext'],
+    // Check if process started successfully
+    if (!serverProcess.pid) {
+      throw new LSPError(
+        `Failed to start LSP server for ${language}`,
+        'PROCESS_START_FAILED',
+        { language }
+      );
+    }
+
+    try {
+      connection.listen();
+
+      // Initialize the server
+      const initializeParams: InitializeParams = {
+        processId: process.pid,
+        rootUri: config.rootUri,
+        workspaceFolders: config.workspaceFolders.map((folder) => ({
+          uri: folder,
+          name: folder.split('/').pop() || '',
+        })),
+        capabilities: {
+          textDocument: {
+            synchronization: {
+              dynamicRegistration: true,
+              willSave: true,
+              willSaveWaitUntil: true,
+              didSave: true,
+            },
+            completion: {
+              dynamicRegistration: true,
+              completionItem: {
+                snippetSupport: true,
+                documentationFormat: ['markdown', 'plaintext'],
+              },
+            },
+            diagnostic: {
+              dynamicRegistration: true,
             },
           },
-          diagnostic: {
-            dynamicRegistration: true,
+          workspace: {
+            workspaceFolders: true,
+            configuration: true,
           },
         },
-        workspace: {
-          workspaceFolders: true,
-          configuration: true,
-        },
-      },
-      initializationOptions: config.initializationOptions,
-    };
+        initializationOptions: config.initializationOptions,
+      };
 
-    await connection.sendRequest(InitializeRequest.type, initializeParams);
-    connection.listen();
+      await connection.sendRequest(InitializeRequest.type, initializeParams);
 
-    return {
-      async getDefinition(
-        uri: string,
-        position: Position
-      ): Promise<Location[]> {
-        try {
-          const result = await connection.sendRequest(DefinitionRequest.type, {
-            textDocument: { uri },
-            position,
-          });
-          if (
-            result &&
-            Array.isArray(result) &&
-            result.every((item) => 'uri' in item && 'range' in item)
-          ) {
-            return result as Location[];
-          }
-
-          throw new LSPError(
-            'Failed to get definition',
-            'FAILED_TO_GET_DEFINITION',
-            { uri, position }
-          );
-        } catch (error) {
-          throw new LSPError(
-            'Failed to get definition',
-            'FAILED_TO_GET_DEFINITION',
-            { uri, position }
-          );
-        }
-      },
-      async initialize(): Promise<void> {
-        await connection.sendRequest(InitializeRequest.type, initializeParams);
-      },
-      async formatDocument(uri: string, content: string): Promise<TextEdit[]> {
-        const result = await connection.sendRequest(
-          DocumentFormattingRequest.type,
-          {
-            textDocument: { uri },
-            options: { tabSize: 2, insertSpaces: true },
-          }
-        );
-        if (result && Array.isArray(result)) {
-          return result as TextEdit[];
-        }
-        throw new LSPError(
-          'Failed to format document',
-          'FAILED_TO_FORMAT_DOCUMENT',
-          { uri }
-        );
-      },
-      async shutdown(): Promise<void> {
-        await connection.sendRequest('shutdown');
-        serverProcess.kill();
-      },
-      async validateDocument(
-        uri: string,
-        content: string
-      ): Promise<Diagnostic[]> {
-        // Notify the server about the document
-        await connection.sendNotification(
-          DidOpenTextDocumentNotification.type,
-          {
-            textDocument: {
-              uri,
-              languageId: language,
-              version: 1,
-              text: content,
-            },
-          }
-        );
-
-        // Request diagnostics
-        const diagnostics = await new Promise<Diagnostic[]>((resolve) => {
-          let results: Diagnostic[] = [];
-
-          connection.onNotification(
-            'textDocument/publishDiagnostics',
-            (params) => {
-              if (params.uri === uri) {
-                results = params.diagnostics;
-                resolve(results);
+      return {
+        async getDefinition(
+          uri: string,
+          position: Position
+        ): Promise<Location[]> {
+          try {
+            const result = await connection.sendRequest(
+              DefinitionRequest.type,
+              {
+                textDocument: { uri },
+                position,
               }
+            );
+            if (
+              result &&
+              Array.isArray(result) &&
+              result.every((item) => 'uri' in item && 'range' in item)
+            ) {
+              return result as Location[];
+            }
+
+            throw new LSPError(
+              'Failed to get definition',
+              'FAILED_TO_GET_DEFINITION',
+              { uri, position }
+            );
+          } catch (error) {
+            throw new LSPError(
+              'Failed to get definition',
+              'FAILED_TO_GET_DEFINITION',
+              { uri, position }
+            );
+          }
+        },
+        async initialize(): Promise<void> {
+          await connection.sendRequest(
+            InitializeRequest.type,
+            initializeParams
+          );
+        },
+        async formatDocument(
+          uri: string,
+          content: string
+        ): Promise<TextEdit[]> {
+          const result = await connection.sendRequest(
+            DocumentFormattingRequest.type,
+            {
+              textDocument: { uri },
+              options: { tabSize: 2, insertSpaces: true },
+            }
+          );
+          if (result && Array.isArray(result)) {
+            return result as TextEdit[];
+          }
+          throw new LSPError(
+            'Failed to format document',
+            'FAILED_TO_FORMAT_DOCUMENT',
+            { uri }
+          );
+        },
+        async shutdown(): Promise<void> {
+          await connection.sendRequest('shutdown');
+          serverProcess.kill();
+        },
+        async validateDocument(
+          uri: string,
+          content: string
+        ): Promise<Diagnostic[]> {
+          // Notify the server about the document
+          await connection.sendNotification(
+            DidOpenTextDocumentNotification.type,
+            {
+              textDocument: {
+                uri,
+                languageId: language,
+                version: 1,
+                text: content,
+              },
             }
           );
 
-          // Set a timeout for diagnostic collection
-          setTimeout(() => resolve(results), 1000);
-        });
+          // Request diagnostics
+          const diagnostics = await new Promise<Diagnostic[]>((resolve) => {
+            let results: Diagnostic[] = [];
 
-        // Close the document
-        await connection.sendNotification(
-          DidCloseTextDocumentNotification.type,
-          {
-            textDocument: { uri },
-          }
-        );
+            connection.onNotification(
+              'textDocument/publishDiagnostics',
+              (params) => {
+                if (params.uri === uri) {
+                  results = params.diagnostics;
+                  resolve(results);
+                }
+              }
+            );
 
-        return diagnostics;
-      },
-    };
+            // Set a timeout for diagnostic collection
+            setTimeout(() => resolve(results), 1000);
+          });
+
+          // Close the document
+          await connection.sendNotification(
+            DidCloseTextDocumentNotification.type,
+            {
+              textDocument: { uri },
+            }
+          );
+
+          return diagnostics;
+        },
+      };
+    } catch (error) {
+      this.logger.error(
+        `Failed to initialize LSP server for ${language}`,
+        error as Error
+      );
+      throw new LSPError(
+        `Failed to initialize server for ${language}`,
+        'START_FAILED',
+        { language, error }
+      );
+    }
   }
 
   /**
@@ -396,8 +447,20 @@ export class LSPManagerImpl implements LSPManager {
    * Disposes of all server instances
    */
   async dispose(): Promise<void> {
-    const languages = Array.from(this.servers.keys());
-    await Promise.all(languages.map((lang) => this.stopServer(lang)));
-    this.logger.info('Disposed LSP manager');
+    // Clean up all processes
+    for (const [language, process] of this.processes) {
+      try {
+        process.kill();
+        this.logger.info(`Killed LSP server process for ${language}`);
+      } catch (error) {
+        this.logger.error(
+          `Failed to kill LSP server process for ${language}`,
+          error as Error
+        );
+      }
+    }
+
+    this.processes.clear();
+    this.servers.clear();
   }
 }

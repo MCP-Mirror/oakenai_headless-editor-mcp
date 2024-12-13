@@ -19,7 +19,7 @@ export interface Logger {
   warn(message: string, context?: Record<string, unknown>): void;
   error(
     message: string,
-    error?: Error,
+    error?: Error | any,
     context?: Record<string, unknown>
   ): void;
   setLevel(level: LogLevel): void;

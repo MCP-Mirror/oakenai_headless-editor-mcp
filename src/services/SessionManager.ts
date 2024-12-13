@@ -1,11 +1,18 @@
 // src/services/SessionManager.ts
-
 import { v4 as uuidv4 } from 'uuid';
+import { Diagnostic, TextEdit } from 'vscode-languageserver-protocol';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { EditSession } from '../types/editor.js';
+import {
+  EditOperationState,
+  EditSession,
+  SessionState,
+} from '../types/editor.js';
 import { SessionError } from '../types/errors.js';
+import { LSPManager } from '../types/lsp.js';
 import { FileSystemManager } from '../utils/fs.js';
 import { Logger } from '../utils/logger.js';
+
+const MAX_HISTORY_SIZE = 100;
 
 export class SessionManager {
   private sessions: Map<string, EditSession>;
@@ -14,12 +21,38 @@ export class SessionManager {
 
   constructor(
     private readonly fs: FileSystemManager,
-    private logger: Logger,
+    private readonly lspManager: LSPManager,
+    private readonly logger: Logger,
     private readonly allowedDirectories: string[]
   ) {
+    this.lspManager = lspManager;
     this.logger = logger;
     this.sessions = new Map();
     this.startCleanupInterval();
+  }
+
+  private createInitialState(): SessionState {
+    return {
+      editHistory: {
+        operations: [],
+        currentIndex: -1,
+        canUndo: false,
+        canRedo: false,
+      },
+      validationState: {
+        lastChecked: Date.now(),
+        diagnostics: [],
+        isValid: true,
+        inProgress: false,
+      },
+      languageServerState: {
+        connected: false,
+        capabilities: {},
+      },
+      lastModified: Date.now(),
+      isSaving: false,
+      isDirty: false,
+    };
   }
 
   /**
@@ -34,13 +67,11 @@ export class SessionManager {
     languageId: string
   ): Promise<EditSession> {
     try {
-      // Validate file path is within allowed directories
       const validatedPath = await this.fs.validatePath(
         filePath,
         this.allowedDirectories
       );
 
-      // Check if file exists
       const exists = await this.fs.exists(validatedPath);
       if (!exists) {
         throw new SessionError(
@@ -50,10 +81,7 @@ export class SessionManager {
         );
       }
 
-      // Read file content
       const content = await this.fs.readFile(validatedPath);
-
-      // Create text document
       const document = TextDocument.create(
         validatedPath,
         languageId,
@@ -69,6 +97,19 @@ export class SessionManager {
         languageId,
         createdAt: Date.now(),
         lastActivity: Date.now(),
+        state: this.createInitialState(),
+      };
+
+      // Initialize language server
+      await this.lspManager.startServer(languageId);
+
+      // Update language server state
+      const server = await this.lspManager.getServer(languageId);
+      const capabilities = await server.initialize();
+
+      session.state.languageServerState = {
+        connected: true,
+        capabilities: {},
       };
 
       this.sessions.set(sessionId, session);
@@ -86,15 +127,239 @@ export class SessionManager {
         languageId,
       });
 
-      if (error instanceof SessionError) {
-        throw error;
-      }
-
-      throw new SessionError('Failed to create edit session', 'CREATE_FAILED', {
-        filePath,
-        error,
-      });
+      throw error;
     }
+  }
+
+  /**
+   * Records an edit operation in the session's history
+   */
+  async recordEdit(
+    sessionId: string,
+    changes: TextEdit[],
+    documentVersion: number
+  ): Promise<void> {
+    const session = await this.getSession(sessionId);
+
+    const operation: EditOperationState = {
+      timestamp: Date.now(),
+      changes,
+      documentVersion,
+    };
+
+    const history = session.state.editHistory;
+
+    // If we're not at the end of the history, truncate the future operations
+    if (history.currentIndex < history.operations.length - 1) {
+      history.operations = history.operations.slice(
+        0,
+        history.currentIndex + 1
+      );
+    }
+
+    // Add new operation
+    history.operations.push(operation);
+
+    // Maintain maximum history size
+    if (history.operations.length > MAX_HISTORY_SIZE) {
+      history.operations = history.operations.slice(-MAX_HISTORY_SIZE);
+    }
+
+    // Update history state
+    history.currentIndex = history.operations.length - 1;
+    history.canUndo = history.currentIndex >= 0;
+    history.canRedo = false;
+
+    // Update session state
+    session.state.lastModified = Date.now();
+    session.state.isDirty = true;
+
+    await this.updateSession(sessionId, {
+      state: session.state,
+    });
+
+    this.logger.debug('Recorded edit operation', {
+      sessionId,
+      operationCount: history.operations.length,
+      documentVersion,
+    });
+  }
+
+  /**
+   * Updates the validation state for a session
+   */
+  async updateValidationState(
+    sessionId: string,
+    diagnostics: Diagnostic[]
+  ): Promise<void> {
+    const session = await this.getSession(sessionId);
+
+    session.state.validationState = {
+      lastChecked: Date.now(),
+      diagnostics,
+      isValid: diagnostics.length === 0,
+      inProgress: false,
+    };
+
+    await this.updateSession(sessionId, {
+      state: session.state,
+    });
+
+    this.logger.debug('Updated validation state', {
+      sessionId,
+      isValid: session.state.validationState.isValid,
+      diagnosticsCount: diagnostics.length,
+    });
+  }
+
+  /**
+   * Updates the language server state for a session
+   */
+  async updateLanguageServerState(
+    sessionId: string,
+    connected: boolean,
+    capabilities?: Record<string, unknown>,
+    error?: Error
+  ): Promise<void> {
+    const session = await this.getSession(sessionId);
+
+    session.state.languageServerState = {
+      connected,
+      capabilities: capabilities ?? {},
+      ...(error && {
+        lastError: {
+          message: error.message,
+          timestamp: Date.now(),
+        },
+      }),
+    };
+
+    await this.updateSession(sessionId, {
+      state: session.state,
+    });
+
+    this.logger.debug('Updated language server state', {
+      sessionId,
+      connected,
+      hasError: !!error,
+    });
+  }
+
+  /**
+   * Attempts to undo the last operation
+   */
+  async undo(sessionId: string): Promise<boolean> {
+    const session = await this.getSession(sessionId);
+    const history = session.state.editHistory;
+
+    if (!history.canUndo) {
+      return false;
+    }
+
+    // Apply inverse of the last operation
+    const operation = history.operations[history.currentIndex];
+    const inverseChanges = this.createInverseChanges(operation.changes);
+
+    // Apply changes to document
+    const newContent = TextDocument.applyEdits(
+      session.document,
+      inverseChanges
+    );
+    const newVersion = session.document.version + 1;
+
+    // Create new document with changes
+    const updatedDoc = TextDocument.create(
+      session.document.uri,
+      session.languageId,
+      newVersion,
+      newContent
+    );
+
+    // Update history state
+    history.currentIndex--;
+    history.canUndo = history.currentIndex >= 0;
+    history.canRedo = true;
+
+    // Update session
+    await this.updateSession(sessionId, {
+      document: updatedDoc,
+      state: {
+        ...session.state,
+        editHistory: history,
+        lastModified: Date.now(),
+        isDirty: true,
+      },
+    });
+
+    this.logger.debug('Performed undo operation', {
+      sessionId,
+      newHistoryIndex: history.currentIndex,
+    });
+
+    return true;
+  }
+
+  /**
+   * Attempts to redo the last undone operation
+   */
+  async redo(sessionId: string): Promise<boolean> {
+    const session = await this.getSession(sessionId);
+    const history = session.state.editHistory;
+
+    if (!history.canRedo) {
+      return false;
+    }
+
+    // Get the next operation
+    const operation = history.operations[history.currentIndex + 1];
+
+    // Apply changes to document
+    const newContent = TextDocument.applyEdits(
+      session.document,
+      operation.changes
+    );
+    const newVersion = session.document.version + 1;
+
+    // Create new document with changes
+    const updatedDoc = TextDocument.create(
+      session.document.uri,
+      session.languageId,
+      newVersion,
+      newContent
+    );
+
+    // Update history state
+    history.currentIndex++;
+    history.canUndo = true;
+    history.canRedo = history.currentIndex < history.operations.length - 1;
+
+    // Update session
+    await this.updateSession(sessionId, {
+      document: updatedDoc,
+      state: {
+        ...session.state,
+        editHistory: history,
+        lastModified: Date.now(),
+        isDirty: true,
+      },
+    });
+
+    this.logger.debug('Performed redo operation', {
+      sessionId,
+      newHistoryIndex: history.currentIndex,
+    });
+
+    return true;
+  }
+
+  /**
+   * Creates inverse changes for undo operations
+   */
+  private createInverseChanges(changes: TextEdit[]): TextEdit[] {
+    return changes.map((change) => ({
+      range: change.range,
+      newText: '', // For simplicity, we're just removing the text. A more complex implementation would store the original text.
+    }));
   }
 
   /**

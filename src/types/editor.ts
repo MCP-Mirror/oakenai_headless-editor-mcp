@@ -9,29 +9,6 @@ import {
 import { TextDocument } from 'vscode-languageserver-textdocument';
 
 /**
- * Represents a session for editing code
- */
-export interface EditSession {
-  /** Unique identifier for the session */
-  id: string;
-
-  /** Path to the file being edited */
-  filePath: string;
-
-  /** Current document state */
-  document: TextDocument;
-
-  /** Language identifier (e.g., 'typescript', 'python') */
-  languageId: string;
-
-  /** Creation timestamp */
-  createdAt: number;
-
-  /** Last activity timestamp */
-  lastActivity: number;
-}
-
-/**
  * Describes the target location for an edit operation
  */
 export interface CodeTarget {
@@ -140,27 +117,58 @@ export interface SessionManager {
   cleanupInactiveSessions(maxInactiveTime: number): Promise<void>;
 }
 
-/**
- * Log levels for the system
- */
-export enum LogLevel {
-  DEBUG = 'debug',
-  INFO = 'info',
-  WARN = 'warn',
-  ERROR = 'error',
+// Track state of language server connection
+export interface LanguageServerState {
+  connected: boolean;
+  capabilities: Record<string, unknown>;
+  lastError?: {
+    message: string;
+    timestamp: number;
+  };
+}
+
+// Track individual edit operations
+export interface EditOperationState {
+  timestamp: number;
+  changes: TextEdit[];
+  documentVersion: number;
+}
+
+// Track validation state
+export interface ValidationState {
+  lastChecked: number;
+  diagnostics: Diagnostic[];
+  isValid: boolean;
+  inProgress: boolean;
+}
+
+// Enhanced edit history tracking
+export interface EditHistory {
+  operations: EditOperationState[];
+  currentIndex: number;
+  canUndo: boolean;
+  canRedo: boolean;
+}
+
+// Enhanced session state
+export interface SessionState {
+  editHistory: EditHistory;
+  validationState: ValidationState;
+  languageServerState: LanguageServerState;
+  lastModified: number;
+  isSaving: boolean;
+  isDirty: boolean;
 }
 
 /**
- * Interface for system logging
+ * Represents a session for editing code
  */
-export interface Logger {
-  debug(message: string, context?: Record<string, unknown>): void;
-  info(message: string, context?: Record<string, unknown>): void;
-  warn(message: string, context?: Record<string, unknown>): void;
-  error(
-    message: string,
-    error?: Error,
-    context?: Record<string, unknown>
-  ): void;
-  setLevel(level: LogLevel): void;
+export interface EditSession {
+  id: string;
+  filePath: string;
+  document: TextDocument;
+  languageId: string;
+  createdAt: number;
+  lastActivity: number;
+  state: SessionState;
 }

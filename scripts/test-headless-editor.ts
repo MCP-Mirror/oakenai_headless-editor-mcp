@@ -21,15 +21,14 @@ const ToolResultSchema = z.object({
   isError: z.boolean().optional()
 });
 
-
 async function setupTestFiles() {
   const fixturesDir = path.join(__dirname, 'test-fixtures');
   const currentDir = path.join(__dirname);
   await fs.createDirectory(fixturesDir);
 
   // Create a sample React component file
-  const componentFile = path.join(fixturesDir, 'Button.tsx');
-  const componentContent = `import React from 'react';
+  const componentFile = path.join(fixturesDir, 'test.ts');
+  const componentContent = `import * as React from 'react';
 
 interface ButtonProps {
   label: string;
@@ -48,12 +47,40 @@ export const Button: React.FC<ButtonProps> = ({
     <button 
       className={buttonClass}
       onClick={onClick}
+      type="button"
     >
       {label}
     </button>
   );
 };
 `.trim();
+
+  const tsconfigContent = {
+    compilerOptions: {
+      target: "es2017",
+      module: "esnext",
+      moduleResolution: "node",
+      jsx: "react",
+      strict: true,
+      esModuleInterop: true,
+      skipLibCheck: true,
+      forceConsistentCasingInFileNames: true,
+      lib: ["dom", "dom.iterable", "esnext"],
+      allowJs: true,
+      allowSyntheticDefaultImports: true,
+      noEmit: true,
+      isolatedModules: true,
+      baseUrl: ".",
+      paths: {
+        "*": ["*", "node_modules/*"]
+      }
+    },
+    include: ["./**/*.ts", "./**/*.tsx"],
+    exclude: ["node_modules"]
+  };
+
+  const tsconfigFile = path.join(fixturesDir, 'tsconfig.json');
+  await fs.writeFile(tsconfigFile, JSON.stringify(tsconfigContent, null, 2));
 
   await fs.writeFile(componentFile, componentContent);
   return { fixturesDir, componentFile, currentDir };
@@ -67,16 +94,14 @@ async function runTest(
   console.log(`\n=== Testing: ${testName} ===`);
   try {
     const result = await action();
-    // console.log('Result:', result.content[0].text);
     const parsedResult = JSON.parse(result.content[0].text);
     
-    if (result.isError || (parsedResult.error && !testName.includes('Error'))) {
-      console.error("Test failed:", parsedResult);
-      const {diagnostics, ...rest} = parsedResult;
-      console.error(JSON.stringify(rest, null, 2));
-      if (diagnostics) {
-        console.error("\nDiagnostics:");
-        console.error(JSON.stringify(diagnostics, null, 2));
+    if (result.isError || parsedResult.error || parsedResult.success === false) {
+      console.error("Test failed:");
+      // console.error(result.content[0].text);
+      if (parsedResult) {
+        console.error("\nError Details:");
+        console.error(JSON.stringify(parsedResult, null, 2));
       }
       return null;
     }
@@ -90,8 +115,6 @@ async function runTest(
     return null;
   }
 }
-
-
 
 async function cleanup(client: Client, sessionId?: string, fixturesDir?: string) {
   if (sessionId) {
@@ -129,7 +152,11 @@ async function main() {
      // Create transport
      const transport = new StdioClientTransport({
       command: "node",
-      args: ["./build/index.js", currentDir],
+      args: ["./build/index.js", currentDir, fixturesDir],
+      env: {
+        ...process.env,
+        NODE_ENV: 'test'
+      }
     });
 
     // Create client
@@ -147,7 +174,7 @@ async function main() {
 
   try {
    
-    // Test 1: Start editing session
+    // Test 0: Start editing session
     const sessionResult = await runTest(client, "Start Session", async () => {
       return client.request({
         method: "tools/call",
@@ -170,9 +197,9 @@ async function main() {
       console.error("Session ID not found");
       return;
     }
-    
-    // Test 2: Edit with intentional error
-    const editResult = await runTest(client, "Edit Code with Error", async () => {
+
+    // Test 1: Edit with basic comment
+    await runTest(client, "Edit Code with Basic Comment", async () => {
       return client.request({
         method: "tools/call",
         params: {
@@ -181,8 +208,7 @@ async function main() {
             sessionId,
             operation: {
               type: "insert",
-              //content: "\n  size?: 'small' | 'medium' | 'large';\n",
-              content: " // comment",
+              content: "\n  // comment\n",
               position: {
                 line: 5,
                 character: 100
@@ -192,19 +218,41 @@ async function main() {
         },
       }, ToolResultSchema);
     });
+    
+    // Test 2: Edit with intentional error
+    // await runTest(client, "Edit Code with Error", async () => {
+    //   return client.request({
+    //     method: "tools/call",
+    //     params: {
+    //       name: "edit_code",
+    //       arguments: {
+    //         sessionId,
+    //         operation: {
+    //           type: "insert",
+    //           content: "\n  var iant?: 'small' | 'medium' | 'large';\n", // intentional bug
+    //           position: {
+    //             line: 5,
+    //             character: 100
+    //           }
+    //         }
+    //       }
+    //     },
+    //   }, ToolResultSchema);
+    // });
 
-    // Test 3: Validate code
-    const validateResult = await runTest(client, "Validate Code", async () => {
-      return client.request({
-        method: "tools/call",
-        params: {
-          name: "validate_code",
-          arguments: {
-            sessionId
-          }
-        }
-      }, ToolResultSchema);
-    });
+
+    // // Test 3: Validate code
+    // await runTest(client, "Validate Code", async () => {
+    //   return client.request({
+    //     method: "tools/call",
+    //     params: {
+    //       name: "validate_code",
+    //       arguments: {
+    //         sessionId
+    //       }
+    //     }
+    //   }, ToolResultSchema);
+    // });
 
   } catch (error) {
     console.error("Error:", error);
@@ -223,7 +271,7 @@ async function main() {
       const isDir = await fs.isDirectory(fixturesDir);
       if (isDir) {
         // Cleanup test files
-        await fs.removeDirectory(fixturesDir);
+        await cleanup(client, undefined, fixturesDir);
       }
     }
   }

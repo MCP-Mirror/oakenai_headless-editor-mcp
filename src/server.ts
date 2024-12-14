@@ -98,13 +98,16 @@ export class HeadlessEditorServer {
             : LogLevel.DEBUG,
         logDir: logDir,
         filename: process.env.LOG_FILE ?? 'app-%DATE%.log',
-        //console: process.env.NODE_ENV !== 'production'
-        console: false,
+        console: process.env.NODE_ENV !== 'production',
       },
       this.fs
     );
 
-    this.lspManager = new LSPManagerImpl(this.logger);
+    this.lspManager = new LSPManagerImpl(
+      this.logger,
+      this.fs,
+      this.allowedDirectories
+    );
     this.documentManager = new DocumentManager(
       this.fs,
       this.lspManager,

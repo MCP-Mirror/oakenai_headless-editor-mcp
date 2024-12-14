@@ -1,5 +1,7 @@
 // src/services/LSPManager.ts
 import { ChildProcess, spawn } from 'child_process';
+import path from 'path';
+import { ClientCapabilities } from '@modelcontextprotocol/sdk/types.js';
 import {
   createProtocolConnection,
   DefinitionRequest,
@@ -13,6 +15,7 @@ import {
   LocationLink,
   Position,
   ProtocolConnection,
+  ServerCapabilities,
   TextEdit,
 } from 'vscode-languageserver-protocol';
 import {
@@ -21,11 +24,13 @@ import {
 } from 'vscode-languageserver-protocol/node.js';
 import { Location } from 'vscode-languageserver-types';
 import { BaseError } from '../types/errors.js';
+import { ProjectContext, TypeScriptOptions } from '../types/language.js';
 import {
   LanguageServer,
   LSPManager,
   TypeScriptServerInitializationOptions,
 } from '../types/lsp.js';
+import { FileSystemManager } from '../utils/fs.js';
 import { Logger } from '../utils/logger.js';
 import { TypeScriptServer } from './languages/typescript.js';
 
@@ -92,18 +97,21 @@ export class LSPManagerImpl implements LSPManager {
   private configs: Map<string, LSPServerConfig>;
   private processes: Map<string, ChildProcess>;
 
-  constructor(private readonly logger: Logger) {
+  constructor(
+    private readonly logger: Logger,
+    private readonly fs: FileSystemManager,
+    private readonly allowedDirectories: string[]
+  ) {
     this.processes = new Map();
     this.servers = new Map();
     this.languageServers = new Map();
     this.configs = new Map();
-    this.logger = logger;
 
-    // Initialize default configs
+    // Register default TypeScript configuration
     this.configs.set('typescript', {
       command: 'typescript-language-server',
       args: ['--stdio'],
-      rootUri: null,
+      rootUri: null, // Will be set during initialization
       workspaceFolders: [],
       initializationOptions: {
         preferences: {
@@ -177,14 +185,48 @@ export class LSPManagerImpl implements LSPManager {
     }
 
     try {
-      const server = await this.createServer(language, config);
+      // For testing, use the config from test fixtures directory
+      if (process.env.NODE_ENV === 'test') {
+        this.logger.info('Using test fixtures directory for LSP server');
+        const testFixturesDir = this.allowedDirectories.find((dir) =>
+          dir.endsWith('test-fixtures')
+        );
+        if (testFixturesDir) {
+          config.rootUri = testFixturesDir;
+        }
+      }
+
+      // Initialize the language server with proper configuration
+      const initParams = await this.initializeLanguageServer(language, config);
+      const server = await this.createServer(language, config, initParams);
       this.servers.set(language, server);
 
       this.logger.info(`Started LSP server for ${language}`);
     } catch (error) {
+      const details =
+        error instanceof Error
+          ? {
+              name: error.name,
+              message: error.message,
+              code: (error as any).code,
+              stack: error.stack,
+              command: (error as any).command,
+              spawnargs: (error as any).spawnargs,
+            }
+          : error;
+
+      this.logger.error('Failed to start language server', {
+        language,
+        error: details,
+      });
+
       this.logger.error(
         `Failed to start LSP server for ${language}`,
-        error as Error
+        error as Error,
+        {
+          language,
+          error: error instanceof Error ? error.stack : error,
+        }
       );
       throw new LSPError(
         `Failed to start server for ${language}`,
@@ -207,78 +249,90 @@ export class LSPManagerImpl implements LSPManager {
    */
   private async createServer(
     language: string,
-    config: LSPServerConfig
+    config: LSPServerConfig,
+    initParams: InitializeParams
   ): Promise<LanguageServer> {
-    // For TypeScript/JavaScript, use TypeScriptServer
-    if (language === 'typescript' || language === 'javascript') {
-      const tsServer = new TypeScriptServer(
-        {
-          rootPath: process.cwd(), // Or get from config
-          preferences: (
-            config.initializationOptions as TypeScriptServerInitializationOptions
-          )?.preferences,
-        },
-        this.logger
+    try {
+      // For TypeScript/JavaScript, use TypeScriptServer
+      if (language === 'typescript' || language === 'javascript') {
+        const tsServer = new TypeScriptServer(
+          {
+            rootPath: process.cwd(), // Or get from config
+            preferences: (initParams.initializationOptions as any)?.typescript
+              ?.preferences,
+          },
+          this.logger
+        );
+
+        await tsServer.initialize();
+        this.languageServers.set(language, tsServer);
+
+        // Return LanguageServer interface implementation
+        return {
+          async initialize(): Promise<void> {
+            // Already initialized
+          },
+
+          async shutdown(): Promise<void> {
+            await tsServer.shutdown();
+          },
+
+          async validateDocument(
+            uri: string,
+            content: string
+          ): Promise<Diagnostic[]> {
+            return tsServer.validateDocument(uri, content);
+          },
+
+          async formatDocument(
+            uri: string,
+            content: string
+          ): Promise<TextEdit[]> {
+            return tsServer.formatDocument(uri);
+          },
+
+          async getDefinition(
+            uri: string,
+            position: Position
+          ): Promise<Location[] | LocationLink[]> {
+            return tsServer.getDefinition(uri, position);
+          },
+
+          async didOpen(
+            uri: string,
+            content: string,
+            version: number
+          ): Promise<void> {
+            return tsServer.didOpen(uri, content, version);
+          },
+
+          async didChange(
+            uri: string,
+            changes: TextEdit[],
+            version: number
+          ): Promise<void> {
+            return tsServer.didChange(uri, changes, version);
+          },
+
+          async didClose(uri: string): Promise<void> {
+            return tsServer.didClose(uri);
+          },
+        };
+      }
+
+      // For other languages, use the generic LSP implementation
+      return this.createGenericServer(language, config);
+    } catch (error) {
+      this.logger.error(
+        `Failed to create server for ${language}`,
+        error as Error
       );
-
-      await tsServer.initialize();
-      this.languageServers.set(language, tsServer);
-
-      // Return LanguageServer interface implementation
-      return {
-        async initialize(): Promise<void> {
-          // Already initialized
-        },
-
-        async shutdown(): Promise<void> {
-          await tsServer.shutdown();
-        },
-
-        async validateDocument(
-          uri: string,
-          content: string
-        ): Promise<Diagnostic[]> {
-          return tsServer.validateDocument(uri, content);
-        },
-
-        async formatDocument(
-          uri: string,
-          content: string
-        ): Promise<TextEdit[]> {
-          return tsServer.formatDocument(uri);
-        },
-
-        async getDefinition(
-          uri: string,
-          position: Position
-        ): Promise<Location[] | LocationLink[]> {
-          return tsServer.getDefinition(uri, position);
-        },
-
-        async didOpen(
-          uri: string,
-          content: string,
-          version: number
-        ): Promise<void> {
-          return tsServer.didOpen(uri, content, version);
-        },
-
-        async didChange(
-          uri: string,
-          changes: TextEdit[],
-          version: number
-        ): Promise<void> {
-          return tsServer.didChange(uri, changes, version);
-        },
-
-        async didClose(uri: string): Promise<void> {
-          return tsServer.didClose(uri);
-        },
-      };
+      throw new LSPError(
+        `Failed to create server for ${language}`,
+        'CREATE_FAILED',
+        { language, error }
+      );
     }
-
-    // For other languages, use the generic LSP implementation
-    return this.createGenericServer(language, config);
   }
 
   private async createGenericServer(
@@ -482,6 +536,203 @@ export class LSPManagerImpl implements LSPManager {
         { language, error }
       );
     }
+  }
+
+  private async initializeTypeScriptServer(
+    baseParams: InitializeParams,
+    projectContext: ProjectContext
+  ): Promise<InitializeParams> {
+    const tsOptions = projectContext.languageOptions
+      ?.specificOptions as TypeScriptOptions;
+
+    if (!tsOptions) {
+      throw new LSPError(
+        'TypeScript options not found in project context',
+        'INVALID_CONFIG'
+      );
+    }
+
+    // Add TypeScript-specific client capabilities
+    const tsClientCapabilities: ClientCapabilities = {
+      ...baseParams.capabilities,
+      textDocument: {
+        ...baseParams.capabilities.textDocument,
+        typeDefinition: {
+          dynamicRegistration: true,
+          linkSupport: true,
+        },
+        implementation: {
+          dynamicRegistration: true,
+          linkSupport: true,
+        },
+        semanticTokens: {
+          dynamicRegistration: true,
+          requests: {
+            full: {
+              delta: true,
+            },
+            range: true,
+          },
+        },
+        inlayHint: {
+          dynamicRegistration: true,
+          resolveSupport: {
+            properties: ['tooltip', 'textEdits', 'label.tooltip'],
+          },
+        },
+      },
+    };
+
+    return {
+      ...baseParams,
+      capabilities: tsClientCapabilities,
+      initializationOptions: {
+        typescript: {
+          tsdk: path.join(
+            projectContext.rootPath,
+            'node_modules',
+            'typescript',
+            'lib'
+          ),
+          preferences: {
+            importModuleSpecifierPreference: 'relative',
+            includeCompletionsForModuleExports: true,
+            includeCompletionsWithSnippetText: true,
+            includeAutomaticOptionalChainCompletions: true,
+            includeInlayParameterNameHints: 'all',
+            includeInlayPropertyDeclarationTypeHints: true,
+            includeInlayFunctionLikeReturnTypeHints: true,
+          },
+          tsserver: {
+            maxTsServerMemory: 4096,
+            useSyntaxServer: 'auto',
+          },
+          ...tsOptions.compilerOptions,
+        },
+      },
+    };
+  }
+
+  private async initializeLanguageServer(
+    language: string,
+    config: LSPServerConfig
+  ): Promise<InitializeParams> {
+    const projectContext = await this.createProjectContext(language, config);
+
+    // Define client capabilities that we support
+    const clientCapabilities: ClientCapabilities = {
+      textDocument: {
+        synchronization: {
+          dynamicRegistration: true,
+          willSave: true,
+          willSaveWaitUntil: true,
+          didSave: true,
+        },
+        completion: {
+          dynamicRegistration: true,
+          completionItem: {
+            snippetSupport: true,
+            documentationFormat: ['markdown', 'plaintext'],
+          },
+        },
+        hover: {
+          dynamicRegistration: true,
+          contentFormat: ['markdown', 'plaintext'],
+        },
+        definition: {
+          dynamicRegistration: true,
+          linkSupport: true,
+        },
+        references: {
+          dynamicRegistration: true,
+        },
+        documentFormatting: {
+          dynamicRegistration: true,
+        },
+        documentSymbol: {
+          dynamicRegistration: true,
+          hierarchicalDocumentSymbolSupport: true,
+        },
+      },
+      workspace: {
+        workspaceFolders: true,
+        configuration: true,
+        didChangeConfiguration: {
+          dynamicRegistration: true,
+        },
+        didChangeWatchedFiles: {
+          dynamicRegistration: true,
+        },
+      },
+    };
+
+    // Base initialization parameters
+    const baseParams: InitializeParams = {
+      processId: process.pid,
+      rootUri: projectContext.rootPath,
+      workspaceFolders: config.workspaceFolders.map((folder) => ({
+        uri: folder,
+        name: path.basename(folder),
+      })),
+      capabilities: clientCapabilities,
+    };
+
+    // Language-specific initialization
+    switch (language) {
+      case 'typescript':
+        return this.initializeTypeScriptServer(baseParams, projectContext);
+      default:
+        return baseParams;
+    }
+  }
+
+  private async createProjectContext(
+    language: string,
+    config: LSPServerConfig
+  ): Promise<ProjectContext> {
+    const context: ProjectContext = {
+      rootPath: config.rootUri || process.cwd(),
+      workspacePath: config.workspaceFolders[0],
+      languageOptions: {
+        formatOptions: {
+          tabSize: 2,
+          insertSpaces: true,
+        },
+      },
+    };
+
+    if (language === 'typescript') {
+      context.languageOptions!.specificOptions = {
+        languageId: 'typescript',
+        compilerOptions: {
+          jsx: 'react',
+          esModuleInterop: true,
+          lib: ['dom', 'dom.iterable', 'esnext'],
+          strict: true,
+        },
+      } as TypeScriptOptions;
+    }
+
+    // Find language-specific config files
+    context.configPath = await this.findConfig(
+      context.rootPath,
+      language === 'typescript' ? ['tsconfig.json'] : []
+    );
+
+    return context;
+  }
+
+  private async findConfig(
+    rootPath: string,
+    configFiles: string[]
+  ): Promise<string | undefined> {
+    for (const file of configFiles) {
+      const configPath = path.join(rootPath, file);
+      if (await this.fs.exists(configPath)) {
+        return configPath;
+      }
+    }
+    return undefined;
   }
 
   /**
